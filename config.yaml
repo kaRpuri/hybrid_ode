@@ -1,0 +1,46 @@
+# Hybrid Neural ODE Vehicle Dynamics Configuration
+
+# Data paths and splitting
+data:
+  input_file: "data"
+  output_dir: "results/"
+
+  train_ratio: 0.7    # 70% of robots for training
+  val_ratio: 0.15     # 15% of robots for validation  
+  test_ratio: 0.15    # 15% of robots for testing
+
+  num_multi_step_predictions: 10  # Length of prediction horizon
+
+
+# Model architecture
+
+model:
+  state_names: ["delta_x", "delta_y", "yaw", "steering", "velocity", "side_slip", "yaw_rate"]
+  input_names: ["acceleration", "steering_rate"]
+  physics_states: [0, 1, 2, 3]  # kinematic equations
+  neural_states: [4, 5, 6]      # neural network
+  hidden_size: 256
+  
+# Training parameters
+training:
+  learning_rate: 0.025
+  weight_decay: 0.0001   # L2 regularization
+  epochs: 500
+  batch_size: 32  # increase batch size as much as gpu fits
+  
+  # Multi-step prediction parameters
+  use_weighted_loss: true         # Whether to use time-weighted loss
+  prediction_decay_rate: 0.2     # Decay rate for time weights (higher = more weight on near future)
+
+  
+  # Training process
+  noise_std: 0.0                  # Noise to add during training
+  validation_interval: 10         # How often to validate
+  early_stopping_patience: 20     # Patience for early stopping
+  
+  # For compatibility with old code
+  segment_size: 80                # Not used in multi-step training
+
+# Settings
+random_seed: 42
+verbose: true
