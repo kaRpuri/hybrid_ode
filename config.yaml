@@ -9,7 +9,7 @@ data:
   val_ratio: 0.15     # 15% of robots for validation  
   test_ratio: 0.15    # 15% of robots for testing
 
-  num_multi_step_predictions: 9  # Length of prediction horizon
+  num_multi_step_predictions: 10  # Length of prediction horizon
 
   noise_std: 0.0 
 
@@ -21,7 +21,6 @@ model:
   input_names: ["acceleration", "steering_rate"]
   physics_states: [0, 1, 2, 3]  # kinematic equations
   neural_states: [4, 5, 6]      # neural network
-  hidden_size: 256
   
 # Training parameters
 training:

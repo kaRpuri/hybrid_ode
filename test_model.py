@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Any
 from tqdm import tqdm
 
-from models import HybridODE, create_model_from_config
+from archive.models import HybridODE, create_model_from_config
 from data_processing import process_data
 
 

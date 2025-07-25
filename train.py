@@ -24,7 +24,7 @@ from flax.training import train_state
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from models import HybridODE, create_model_from_config, create_train_state
+from archive.models import HybridODE, create_model_from_config, create_train_state
 from data_processing import process_data
 
 
