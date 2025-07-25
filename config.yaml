@@ -2,14 +2,16 @@
 
 # Data paths and splitting
 data:
-  input_file: "data"
+  input_dir: "data"
   output_dir: "results/"
 
   train_ratio: 0.7    # 70% of robots for training
   val_ratio: 0.15     # 15% of robots for validation  
   test_ratio: 0.15    # 15% of robots for testing
 
-  num_multi_step_predictions: 10  # Length of prediction horizon
+  num_multi_step_predictions: 9  # Length of prediction horizon
+
+  noise_std: 0.0 
 
 
 # Model architecture
@@ -34,7 +36,7 @@ training:
 
   
   # Training process
-  noise_std: 0.0                  # Noise to add during training
+                   # Noise to add during training
   validation_interval: 10         # How often to validate
   early_stopping_patience: 20     # Patience for early stopping
   

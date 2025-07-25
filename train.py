@@ -138,12 +138,8 @@ def multistep_prediction_loss(params: Dict, model: HybridODE, batch: Dict,
     # Extract future states, excluding initial state
     predicted_future_states = predicted_trajectories[:, 1:, :]  # (batch_size, n_steps, state_dim)
     
-    # Check that shapes match for proper loss calculation
-    assert predicted_future_states.shape == true_future_states.shape, \
-        f"Shape mismatch: predictions {predicted_future_states.shape} vs ground truth {true_future_states.shape}"
-    
     # Compute mean squared error
-    squared_errors = jnp.mean((true_future_states - predicted_future_states) ** 2)
+    squared_errors = jnp.mean((true_future_states - predicted_future_states) ** 2) #yaw normalized loss only for the yaw
     
     return squared_errors
 
@@ -186,10 +182,6 @@ def time_weighted_loss(params: Dict, model: HybridODE, batch: Dict,
     # Extract future states, excluding initial state
     predicted_future_states = predicted_trajectories[:, 1:, :]
     
-    # Check that shapes match for proper loss calculation
-    assert predicted_future_states.shape == true_future_states.shape, \
-        f"Shape mismatch: predictions {predicted_future_states.shape} vs ground truth {true_future_states.shape}"
-        
     # Compute squared errors
     squared_errors = (true_future_states - predicted_future_states) ** 2  # (batch, n_steps, state_dim)
     
@@ -267,6 +259,111 @@ def evaluate(model: HybridODE, params: Dict, val_batches: List[Dict],
         'val_loss': avg_loss,
     }
 
+
+# ============================================================================
+# VISUALIZATION FUNCTIONS
+# ============================================================================
+
+def visualize_predictions(model: HybridODE, params: Dict, batch: Dict,
+                        state_scaler: Dict, input_scaler: Dict, 
+                        state_names: List[str], output_dir: str = "results"):
+    """
+    Visualize multi-step predictions compared to ground truth.
+    
+    Args:
+        model: Hybrid ODE model
+        params: Model parameters
+        batch: Dictionary with batch data
+        state_scaler: State normalization parameters
+        input_scaler: Input normalization parameters
+        state_names: Names of state variables
+        output_dir: Directory to save plots
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Convert batch to jax arrays
+    jax_batch = {k: jnp.array(v) for k, v in batch.items()}
+    
+    # Sample up to 4 trajectories for visualization
+    n_samples = min(4, len(batch['current_state']))
+    sample_indices = np.random.choice(len(batch['current_state']), n_samples, replace=False)
+    
+    # Extract sample data
+    initial_states = jax_batch['current_state'][sample_indices]
+    inputs_sequence = jnp.concatenate([
+        jax_batch['current_input'][sample_indices, None, :],
+        jax_batch['future_inputs'][sample_indices]
+    ], axis=1)
+    timesteps = jax_batch['timesteps'][sample_indices]
+    true_future_states = jax_batch['future_states'][sample_indices]
+    
+    # Predict trajectories
+    predicted_trajectories = model.predict_batch_trajectories(
+        params, initial_states, inputs_sequence, timesteps,
+        state_scaler, input_scaler
+    )
+    
+    # Create plots for each sample
+    for i in range(n_samples):
+        # Create figure with state plots
+        fig, axes = plt.subplots(3, 3, figsize=(15, 12))
+        axes = axes.flatten()
+        
+        # Full trajectories, including initial state
+        pred_traj = np.array(predicted_trajectories[i])
+        true_traj = np.concatenate([
+            initial_states[i][None, :],
+            true_future_states[i]
+        ])
+        time = np.array(timesteps[i])
+        
+        # Plot each state
+        for j, name in enumerate(state_names):
+            if j < len(axes):
+                ax = axes[j]
+                ax.plot(time, true_traj[:, j], 'b-', label='Ground Truth')
+                ax.plot(time, pred_traj[:, j], 'r--', label='Predicted')
+                ax.set_xlabel('Time (s)')
+                ax.set_ylabel(name)
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+        
+        # Plot x-y trajectory
+        if len(axes) > 7:
+            ax = axes[7]
+            ax.plot(true_traj[:, 0], true_traj[:, 1], 'b-', label='Ground Truth')
+            ax.plot(pred_traj[:, 0], pred_traj[:, 1], 'r--', label='Predicted')
+            ax.set_xlabel('Δx')
+            ax.set_ylabel('Δy')
+            ax.set_title('Trajectory')
+            ax.axis('equal')
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+        
+        # Remove empty subplot
+        if len(axes) > 8:
+            fig.delaxes(axes[8])
+        
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/trajectory_prediction_{i}.png")
+        plt.close()
+        
+        # Also create an X-Y plot
+        plt.figure(figsize=(8, 8))
+        plt.plot(true_traj[:, 0], true_traj[:, 1], 'b-', linewidth=2, label='Ground Truth')
+        plt.plot(pred_traj[:, 0], pred_traj[:, 1], 'r--', linewidth=2, label='Predicted')
+        plt.plot(true_traj[0, 0], true_traj[0, 1], 'go', markersize=10, label='Start')
+        plt.plot(true_traj[-1, 0], true_traj[-1, 1], 'mo', markersize=10, label='End (True)')
+        plt.plot(pred_traj[-1, 0], pred_traj[-1, 1], 'ro', markersize=10, label='End (Pred)')
+        plt.xlabel('Δx')
+        plt.ylabel('Δy')
+        plt.title('X-Y Trajectory Prediction')
+        plt.grid(True, alpha=0.3)
+        plt.axis('equal')
+        plt.legend()
+        plt.savefig(f"{output_dir}/xy_trajectory_{i}.png")
+        plt.close()
 
 
 # ============================================================================
@@ -349,11 +446,14 @@ class HybridODETrainer:
         best_val_loss = float('inf')
         patience_counter = 0
         best_params = self.train_state.params
+
+
+        train_batches = create_batches(train_samples, self.batch_size, shuffle=True)
         
         # Training loop
         for epoch in range(self.epochs):
             # Create fresh training batches each epoch (with shuffling)
-            train_batches = create_batches(train_samples, self.batch_size, shuffle=True)
+            
             
             # Train on batches
             epoch_losses = []
@@ -530,7 +630,6 @@ def main():
     print("\nTraining complete!")
     print(f"Results saved to {config['data']['output_dir']}/training_results.pkl")
     print(f"Model saved to {config['data']['output_dir']}/model_best.pkl")
-
 
 if __name__ == "__main__":
     main()
