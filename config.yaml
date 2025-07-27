@@ -24,14 +24,10 @@ model:
   
 # Training parameters
 training:
-  learning_rate: 0.025
+  learning_rate: 0.001
   weight_decay: 0.0001   # L2 regularization
   epochs: 500
-  batch_size: 32  # increase batch size as much as gpu fits
-  
-  # Multi-step prediction parameters
-  use_weighted_loss: true         # Whether to use time-weighted loss
-  prediction_decay_rate: 0.2     # Decay rate for time weights (higher = more weight on near future)
+  batch_size: 20000  # increase batch size as much as gpu fits
 
   
   # Training process

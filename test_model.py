@@ -17,8 +17,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Any
 from tqdm import tqdm
 
-from archive.models import HybridODE, create_model_from_config
-from data_processing import process_data
+from models import HybridODE, create_train_state
 
 
 # ============================================================================
@@ -70,52 +69,36 @@ def compute_metrics(true_states: np.ndarray, pred_states: np.ndarray,
     return metrics
 
 
-def evaluate_sample(model: HybridODE, params: Dict, sample: Dict, 
-                  state_scaler: Dict, input_scaler: Dict) -> Tuple[Dict, np.ndarray]:
+def evaluate_sample(model: HybridODE, params: Dict, sample: np.ndarray) -> Tuple[Dict, np.ndarray]:
     """
     Evaluate model on a single multi-step sample.
     
     Args:
         model: Hybrid ODE model
         params: Model parameters
-        sample: Dictionary with sample data
-        state_scaler: State normalization parameters
-        input_scaler: Input normalization parameters
+        sample: ndarray (9, n_steps)
         
     Returns:
         Tuple of (metrics, predicted_states)
     """
-    # Convert sample to JAX arrays
-    current_state = jnp.array(sample['current_state'])
-    current_input = jnp.array(sample['current_input'])
-    future_inputs = jnp.array(sample['future_inputs'])
-    timesteps = jnp.array(sample['timesteps'])
-    true_future_states = jnp.array(sample['future_states'])
+    state_dim = 7
+    input_dim = 2
+    n_steps = sample.shape[1]
+    initial_state = sample[:state_dim, 0]
+    inputs_sequence = sample[state_dim:, :].T  # shape: (n_steps, 2)
+    true_future_states = sample[:state_dim, :].T  # shape: (n_steps, 7)
+    dt = 0.1  # Or load from config if needed
     
-    # Create input sequence for prediction (including current input)
-    inputs_sequence = jnp.concatenate([current_input[None, :], future_inputs])
+    # Predict trajectory
+    pred_traj = model.predict_trajectory(params, initial_state, inputs_sequence, dt)
     
-    # Initialize state array
-    initial_state = current_state
+    # Remove initial state for metrics (if needed)
+    pred_future = np.array(pred_traj)
     
-    # Make prediction
-    predicted_trajectory = model.predict_trajectory(
-        params, initial_state, inputs_sequence, timesteps,
-        state_scaler, input_scaler
-    )
+    # Compute metrics
+    metrics = compute_metrics(true_future_states, pred_future, ["delta_x", "delta_y", "yaw", "steering", "velocity", "side_slip", "yaw_rate"])
     
-    # Get only future states (exclude initial state which is at index 0)
-    predicted_future = predicted_trajectory[1:]
-    
-    # Convert to numpy for metrics calculation
-    true_future_np = np.array(true_future_states)
-    pred_future_np = np.array(predicted_future)
-    
-    # Compute metrics using normalized values
-    metrics = compute_metrics(true_future_np, pred_future_np, 
-                             ["delta_x", "delta_y", "yaw", "steering", "velocity", "side_slip", "yaw_rate"])
-    
-    return metrics, pred_future_np
+    return metrics, pred_future
 
 
 # ============================================================================
@@ -259,7 +242,7 @@ def evaluate_dataset(model: HybridODE, params: Dict, samples: List[Dict],
         
         # Evaluate sample
         metrics, pred_trajectory = evaluate_sample(
-            model, params, sample, state_scaler, input_scaler
+            model, params, sample
         )
         
         # Add sample info to metrics
@@ -287,7 +270,7 @@ def evaluate_dataset(model: HybridODE, params: Dict, samples: List[Dict],
     return all_metrics
 
 
-def load_model(model_path: str, config: Dict) -> Tuple[HybridODE, Dict, Dict, Dict]:
+def load_model(model_path: str, config: Dict) -> Tuple[HybridODE, Dict]:
     """
     Load trained model and parameters.
     
@@ -296,24 +279,17 @@ def load_model(model_path: str, config: Dict) -> Tuple[HybridODE, Dict, Dict, Di
         config: Configuration dictionary
         
     Returns:
-        Tuple of (model, params, state_scaler, input_scaler)
+        Tuple of (model, params)
     """
     print(f"Loading model from {model_path}...")
     
-    # Create model
-    model = create_model_from_config(config)
-    
-    # Load saved parameters and scalers
+    model = HybridODE(config)
     with open(model_path, 'rb') as f:
-        saved_data = pickle.load(f)
-    
-    params = saved_data['params']
-    state_scaler = saved_data['state_scaler']
-    input_scaler = saved_data['input_scaler']
+        params = pickle.load(f)
     
     print("Model loaded successfully")
     
-    return model, params, state_scaler, input_scaler
+    return model, params
 
 
 def main():
@@ -330,45 +306,27 @@ def main():
         config = yaml.safe_load(f)
     
     # Load model
-    model_path = "results/model_best.pkl"  # Use the best model from training
-    model, params, state_scaler, input_scaler = load_model(model_path, config)
+    model_path = "results/model_params.pkl"  # Use the trained model params
+    model, params = load_model(model_path, config)
     
     # Load data samples
     print("Loading data samples...")
-    train_samples, val_samples, test_samples, _ = load_multistep_samples()
-    print(f"Loaded {len(train_samples)} training samples")
-    print(f"Loaded {len(val_samples)} validation samples")
+    test_data = np.load("processed_data/test_data.npz")
+    test_samples = test_data["samples"]
     print(f"Loaded {len(test_samples)} test samples")
     
     # Evaluate on test data
     print("\nEvaluating on test data...")
-    test_metrics = evaluate_dataset(
-        model, params, test_samples, state_scaler, input_scaler, 
-        "test", max_samples=None
-    )
-    
-    # Optional: Evaluate on a small subset of validation data for comparison
-    print("\nEvaluating on validation data (subset)...")
-    val_metrics = evaluate_dataset(
-        model, params, val_samples, state_scaler, input_scaler, 
-        "val", max_samples=500  # Limit to 500 samples for efficiency
-    )
-    
-    # Print summary results
-    print("\n" + "=" * 60)
-    print("EVALUATION SUMMARY")
-    print("=" * 60)
-    
-    # Calculate average metrics
-    test_mse = np.mean([m['mse'] for m in test_metrics])
-    test_pos_error = np.mean([m['mean_pos_error'] for m in test_metrics])
-    val_mse = np.mean([m['mse'] for m in val_metrics])
-    val_pos_error = np.mean([m['mean_pos_error'] for m in val_metrics])
-    
-    print(f"Test MSE: {test_mse:.6f}")
-    print(f"Test Position Error: {test_pos_error:.6f}m")
-    print(f"Validation MSE: {val_mse:.6f}")
-    print(f"Validation Position Error: {val_pos_error:.6f}m")
+    test_metrics = []
+    for i, sample in enumerate(tqdm(test_samples, desc="Evaluating test")):
+        metrics, pred_traj = evaluate_sample(model, params, sample)
+        test_metrics.append(metrics)
+        # Optionally save trajectory data
+        # save_trajectory_data(i, 0, sample[:7, :].T, pred_traj, np.arange(sample.shape[1]), metrics, "test")
+        if i < 5 or i % 100 == 0:
+            print(f"  Sample {i}: MSE = {metrics['mse']:.6f}, Position Error = {metrics['mean_pos_error']:.6f}m")
+    # Save summary metrics
+    save_summary_metrics(test_metrics, "test")
     
     print("\nDetailed metrics saved to evaluation_results/ directory")
     print("Run visualize_results.py to generate plots from the saved data")

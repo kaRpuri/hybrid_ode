@@ -16,17 +16,17 @@ class MLPDynamics(nn.Module):
     @nn.compact
     def __call__(self, x):
         # Input expects shape (..., 6)
-        x = nn.Dense(1024)(x)
-        x = nn.relu(x)
-        x = nn.Dense(512)(x)
-        x = nn.relu(x)
-        x = nn.Dense(256)(x)
+        x = nn.Dense(128)(x)
         x = nn.relu(x)
         x = nn.Dense(128)(x)
         x = nn.relu(x)
+        x = nn.Dense(128)(x)
+        x = nn.relu(x)
+        x = nn.Dense(64)(x)
+        x = nn.relu(x)
         
         for _ in range(6):  
-            x = nn.Dense(128)(x)
+            x = nn.Dense(32)(x)
             x = nn.relu(x)
         x = nn.Dense(3)(x)
         return x
@@ -62,26 +62,25 @@ class HybridODE:
         return params
 
 
-    def neural_dynamics(self, state, inputs):
-
+    def neural_dynamics(self, state, inputs, params=None):
         input_neural_states = state[3:7]
         nn_inputs = jnp.concatenate((input_neural_states, inputs))
-
-        neural_output = self.neural_net.apply(self.params, nn_inputs)
-
+        if params is None:
+            params = self.params
+        neural_output = self.neural_net.apply(params, nn_inputs)
         return neural_output
     
 
-    def hybrid_dynamics(self, state, inputs):
+    def hybrid_dynamics(self, state, inputs, params=None):
 
         kinematic_derivis = kinematics(state, inputs)
-        neural_derivatives = self.neural_dynamics(state, inputs)
+        neural_derivatives = self.neural_dynamics(state, inputs, params)
 
         state_derives = jnp.concatenate((kinematic_derivis, neural_derivatives))
 
         return state_derives
     
-    def rk4_step(self, state, inputs_t, inputs_t_plus_dt, dt):
+    def rk4_step(self, state, inputs_t, inputs_t_plus_dt, dt, params=None):
         """
         Perform a single RK4 integration step for the hybrid ODE.
         Args:
@@ -95,16 +94,18 @@ class HybridODE:
         """
         inputs_mid = (inputs_t + inputs_t_plus_dt) / 2.0
 
-        k1 = self.hybrid_dynamics(state, inputs_t)
-        k2 = self.hybrid_dynamics(state + dt/2 * k1, inputs_mid)
-        k3 = self.hybrid_dynamics(state + dt/2 * k2, inputs_mid)
-        k4 = self.hybrid_dynamics(state + dt * k3, inputs_t_plus_dt)
+        k1 = self.hybrid_dynamics(state, inputs_t, params)
+        k2 = self.hybrid_dynamics(state + dt/2 * k1, inputs_mid, params)
+        k3 = self.hybrid_dynamics(state + dt/2 * k2, inputs_mid, params)
+        k4 = self.hybrid_dynamics(state + dt * k3, inputs_t_plus_dt, params)
 
         next_state = state + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+        # Wrap yaw (index 2) to [-pi, pi] after integration
+        next_state = next_state.at[2].set(((next_state[2] + jnp.pi) % (2 * jnp.pi)) - jnp.pi)
         return next_state
     
 
-    def predict_trajectory(self, initial_state, inputs_sequence, dt):
+    def predict_trajectory(self, params, initial_state, inputs_sequence, dt):
         """
         Roll out the trajectory for num_steps-1 using the given initial state and input sequence,
         using jax.lax.scan for efficiency. Only predicts up to the last available ground-truth state.
@@ -120,7 +121,7 @@ class HybridODE:
         def scan_step(state, t):
             current_input = inputs_sequence[t]
             next_input = inputs_sequence[t + 1]
-            next_state = self.rk4_step(state, current_input, next_input, dt)
+            next_state = self.rk4_step(state, current_input, next_input, dt, params)
             return next_state, next_state
 
         
@@ -132,18 +133,14 @@ class HybridODE:
     
 
 
-    def predict_batch_trajectories(self, initial_states, inputs_batch, dt):
-        
-        batch_predict_fn = jax.vmap(self.predict_trajectory, in_axes=(0, 0, None))
-
-        return batch_predict_fn(initial_states, inputs_batch, dt)
+    def predict_batch_trajectories(self, params, initial_states, inputs_batch, dt):
+        batch_predict_fn = jax.vmap(lambda s, i: self.predict_trajectory(params, s, i, dt), in_axes=(0, 0))
+        return batch_predict_fn(initial_states, inputs_batch)
     
 
 
 
     
-    
-
 def create_train_state(model, learning_rate, key, weight_decay=0.0):
     """
     Create a Flax TrainState for training the model.
@@ -176,7 +173,7 @@ if __name__ == "__main__":
     print("Testing Hybrid ODE with Multi-Step Prediction (models_new.py)")
     print("=" * 50)
 
-    # Load config
+    # Load  config
     with open("config.yaml", 'r') as f:
         config = yaml.safe_load(f)
 
@@ -208,8 +205,8 @@ if __name__ == "__main__":
     # Use a fixed dt (if your data is uniform in time)
     dt = 0.1  # or set from your config/timestamps if available
 
-    # Predict trajectory
-    pred_traj = model.predict_trajectory(initial_state, inputs_sequence, dt)
+    # Predict trajectory (for demo/testing): pass params explicitly
+    pred_traj = model.predict_trajectory(params, initial_state, inputs_sequence, dt)
     print(f"Predicted trajectory shape: {pred_traj.shape}")
     print("First few predicted states:\n", np.array(pred_traj[:3]))
 

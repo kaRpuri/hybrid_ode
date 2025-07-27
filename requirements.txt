@@ -1,0 +1,10 @@
+jax
+flax
+optax
+numpy
+matplotlib
+seaborn
+tqdm
+wandb
+pandas
+yaml

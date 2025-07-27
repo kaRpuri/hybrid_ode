@@ -41,7 +41,18 @@ def load_trajectory_data(csv_path: str) -> pd.DataFrame:
     Returns:
         DataFrame containing trajectory data
     """
-    return pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path)
+    # Add robot_idx and sample_idx from filename if missing
+    filename = os.path.basename(csv_path)
+    parts = filename.split('_')
+    if 'robot_idx' not in df.columns:
+        df['robot_idx'] = int(parts[1].replace('robot', '')) if len(parts) > 2 else -1
+    if 'sample_idx' not in df.columns:
+        df['sample_idx'] = int(parts[2].replace('sample', '')) if len(parts) > 2 else -1
+    # Add timestep if missing
+    if 'timestep' not in df.columns:
+        df['timestep'] = np.arange(len(df))
+    return df
 
 
 def load_metrics(json_path: str) -> Dict:

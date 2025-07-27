@@ -150,9 +150,14 @@ def compute_normalization_params(train_states, train_inputs):
     """
     all_states = train_states.reshape(-1, train_states.shape[-1])  # (timesteps*train_count, 7)
     all_inputs = train_inputs.reshape(-1, train_inputs.shape[-1])  # (timesteps*train_count, 2)
+    state_mean = np.mean(all_states, axis=0)
+    state_std = np.std(all_states, axis=0)
+    # Do not normalize yaw (index 2)
+    state_mean[2] = 0.0
+    state_std[2] = 1.0
     return {
-        'state_mean': np.mean(all_states, axis=0),
-        'state_std': np.std(all_states, axis=0),
+        'state_mean': state_mean,
+        'state_std': state_std,
         'input_mean': np.mean(all_inputs, axis=0),
         'input_std': np.std(all_inputs, axis=0)
     }
@@ -283,9 +288,17 @@ def process_data(config_path="config.yaml"):
 
 
 if __name__ == "__main__":
-
     process_data("config.yaml")
-
+    # Print normalization parameters for yaw to verify
+    normalization_params = np.load("processed_data/train_data.npz")
+    with open("processed_data/normalization_params.json", "r") as f:
+        norm = json.load(f)
+    print("Yaw normalization check:")
+    print("Yaw mean:", norm['state_mean'][2])
+    print("Yaw std:", norm['state_std'][2])
+    print("Full state mean:", norm['state_mean'])
+    print("Full state std:", norm['state_std'])
+  
 
 
 
