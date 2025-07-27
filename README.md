@@ -41,3 +41,12 @@ python test_model.py
 python visualize_results.py
 ```
 
+## TODO Checklist
+- [x] Make 3D jnp arrays
+- [x] GPU data preloading
+- [x] fix yaw angle
+- [x] fix yaw error
+- [x] Larger model/ batch size
+- [ ] tune training parameters
+- [ ] evaluate model on test_data
+- [ ] write inference
