@@ -1,777 +1,594 @@
-#!/usr/bin/env python3
-"""
-Visualization Script for Hybrid Neural ODE Results
-
-Creates plots from saved evaluation data in the evaluation_results directory.
-Focuses on trajectory visualization and performance metrics analysis.
-"""
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib
 import json
-import os
+import glob
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple, Optional
+
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+from matplotlib.gridspec import GridSpec
 import seaborn as sns
 
-# Set matplotlib backend and style
-matplotlib.use('Agg')  # Use non-interactive backend for better compatibility
-try:
-    plt.style.use('seaborn-v0_8-whitegrid')
-except:
-    try:
-        plt.style.use('seaborn-whitegrid')
-    except:
-        plt.style.use('default')
+# Set style for publication-quality plots
+plt.style.use('seaborn-v0_8')
+sns.set_palette("husl")
 
+# ----------------------------------------------------------------------------- #
+# Configuration and Constants                                                   #
+# ----------------------------------------------------------------------------- #
+STATE_NAMES = ["delta_x", "delta_y", "yaw", "steering", 
+               "velocity", "side_slip", "yaw_rate"]
+STATE_UNITS = ["m", "m", "rad", "rad", "m/s", "rad", "rad/s"]
+STATE_LABELS = [f"{name} [{unit}]" for name, unit in zip(STATE_NAMES, STATE_UNITS)]
 
-# ============================================================================
-# DATA LOADING FUNCTIONS
-# ============================================================================
+RESULTS_DIR = Path("test_results")
+OUTPUT_DIR = Path("visualizations")
 
-def load_trajectory_data(csv_path: str) -> pd.DataFrame:
-    """
-    Load trajectory comparison data from CSV file.
+# ----------------------------------------------------------------------------- #
+# Data Loading Functions                                                        #
+# ----------------------------------------------------------------------------- #
+def load_all_batch_data(results_dir: Path = RESULTS_DIR) -> Tuple[pd.DataFrame, Dict]:
+    """Load all batch CSV files and combine into a single DataFrame."""
+    csv_files = sorted(results_dir.glob("batch_*.csv"))
     
-    Args:
-        csv_path: Path to trajectory CSV file
-        
-    Returns:
-        DataFrame containing trajectory data
-    """
-    df = pd.read_csv(csv_path)
-    # Add robot_idx and sample_idx from filename if missing
-    filename = os.path.basename(csv_path)
-    parts = filename.split('_')
-    if 'robot_idx' not in df.columns:
-        df['robot_idx'] = int(parts[1].replace('robot', '')) if len(parts) > 2 else -1
-    if 'sample_idx' not in df.columns:
-        df['sample_idx'] = int(parts[2].replace('sample', '')) if len(parts) > 2 else -1
-    # Add timestep if missing
-    if 'timestep' not in df.columns:
-        df['timestep'] = np.arange(len(df))
-    return df
+    if not csv_files:
+        raise FileNotFoundError(f"No batch CSV files found in {results_dir}")
+    
+    print(f"Found {len(csv_files)} batch files to process...")
+    
+    # Load and combine all CSV files
+    dfs = []
+    for csv_file in csv_files:
+        df = pd.read_csv(csv_file)
+        dfs.append(df)
+    
+    combined_df = pd.concat(dfs, ignore_index=True)
+    
+    # Load overall statistics if available
+    stats_file = results_dir / "overall_statistics.json"
+    overall_stats = {}
+    if stats_file.exists():
+        with open(stats_file, 'r') as f:
+            overall_stats = json.load(f)
+    
+    print(f"Loaded {len(combined_df)} trajectory points from {len(csv_files)} batches")
+    return combined_df, overall_stats
 
+def sample_trajectories(df: pd.DataFrame, max_trajs: int = 20) -> pd.DataFrame:
+    """Sample a subset of trajectories for cleaner visualization."""
+    unique_trajs = df[['batch', 'traj']].drop_duplicates()
+    if len(unique_trajs) <= max_trajs:
+        return df
+    
+    sampled_trajs = unique_trajs.sample(n=max_trajs, random_state=42)
+    return df.merge(sampled_trajs, on=['batch', 'traj'])
 
-def load_metrics(json_path: str) -> Dict:
-    """
-    Load metrics from JSON file.
-    
-    Args:
-        json_path: Path to metrics JSON file
-        
-    Returns:
-        Dictionary of metrics
-    """
-    with open(json_path, 'r') as f:
-        return json.load(f)
-
-
-def load_summary_metrics(csv_path: str) -> pd.DataFrame:
-    """
-    Load summary metrics from CSV file.
-    
-    Args:
-        csv_path: Path to summary metrics CSV
-        
-    Returns:
-        DataFrame with metrics
-    """
-    return pd.read_csv(csv_path)
-
-
-def find_evaluation_files(eval_dir: str = "evaluation_results", 
-                         dataset: str = "test",
-                         max_files: int = None) -> Tuple[List[str], List[str]]:
-    """
-    Find trajectory and metrics files for a dataset.
-    
-    Args:
-        eval_dir: Evaluation results directory
-        dataset: Dataset name ('train', 'val', or 'test')
-        max_files: Maximum number of files to return
-        
-    Returns:
-        Tuple of (trajectory_files, metrics_files)
-    """
-    eval_path = Path(eval_dir)
-    
-    # Find all trajectory files for the dataset
-    traj_files = list(eval_path.glob(f"{dataset}_*_trajectory.csv"))
-    metrics_files = list(eval_path.glob(f"{dataset}_*_metrics.json"))
-    
-    # Sort by sample index
-    traj_files.sort()
-    metrics_files.sort()
-    
-    # Limit number of files if specified
-    if max_files is not None:
-        traj_files = traj_files[:max_files]
-        metrics_files = metrics_files[:max_files]
-    
-    return traj_files, metrics_files
-
-
-# ============================================================================
-# PLOTTING FUNCTIONS
-# ============================================================================
-
-def plot_trajectory_comparison(trajectory_data: pd.DataFrame, 
-                              title: Optional[str] = None,
-                              save_path: Optional[str] = None,
-                              show_plot: bool = True) -> None:
-    """
-    Create plot comparing true vs. predicted trajectory.
-    
-    Args:
-        trajectory_data: DataFrame with trajectory data
-        title: Optional title override
-        save_path: Optional path to save figure
-        show_plot: Whether to display the plot
-    """
-    fig, ax = plt.subplots(figsize=(10, 8))
-    
-    # Extract data
-    true_x = trajectory_data['true_delta_x']
-    true_y = trajectory_data['true_delta_y']
-    pred_x = trajectory_data['pred_delta_x']
-    pred_y = trajectory_data['pred_delta_y']
-    pos_error = trajectory_data['pos_error']
-    
-    # Extract robot and sample info from column names
-    robot_idx = trajectory_data['robot_idx'].iloc[0] if 'robot_idx' in trajectory_data.columns else '?'
-    sample_idx = trajectory_data['sample_idx'].iloc[0] if 'sample_idx' in trajectory_data.columns else '?'
-    
-    # Create default title if not provided
-    if title is None:
-        title = f"Robot {robot_idx} - Trajectory Comparison (Sample {sample_idx})"
-    
-    # Plot trajectories
-    ax.plot(true_x, true_y, 'b-', linewidth=2, label='Ground Truth')
-    ax.plot(pred_x, pred_y, 'r--', linewidth=2, label='Predicted')
-    
-    # Mark start and endpoints
-    ax.plot(true_x.iloc[0], true_y.iloc[0], 'go', markersize=10, label='Start')
-    ax.plot(true_x.iloc[-1], true_y.iloc[-1], 'bs', markersize=10, label='End (True)')
-    ax.plot(pred_x.iloc[-1], pred_y.iloc[-1], 'rs', markersize=10, label='End (Pred)')
-    
-    # Add error connectors at regular intervals
-    step = max(1, len(true_x) // 10)
-    for i in range(0, len(true_x), step):
-        ax.plot([true_x.iloc[i], pred_x.iloc[i]], 
-               [true_y.iloc[i], pred_y.iloc[i]], 
-               'k-', alpha=0.3)
-    
-    # Formatting
-    ax.set_xlabel('Δx (m)', fontsize=14)
-    ax.set_ylabel('Δy (m)', fontsize=14)
-    ax.set_title(title, fontsize=16)
-    ax.grid(True, alpha=0.3)
-    ax.axis('equal')
-    ax.legend(fontsize=12)
-    
-    # Add statistics
-    mean_error = pos_error.mean()
-    max_error = pos_error.max()
-    final_error = pos_error.iloc[-1]
-    
-    stats_text = f"Mean Error: {mean_error:.3f}m\nMax Error: {max_error:.3f}m\nFinal Error: {final_error:.3f}m"
-    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, 
-           verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
-           fontsize=12)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Trajectory comparison saved to {save_path}")
-    
-    if show_plot:
-        plt.show()
-    else:
-        plt.close(fig)
-
-
-def plot_state_comparison(trajectory_data: pd.DataFrame,
-                         state_name: str,
-                         title: Optional[str] = None,
-                         save_path: Optional[str] = None,
-                         show_plot: bool = True) -> None:
-    """
-    Plot comparison of true vs. predicted values for a specific state variable.
-    
-    Args:
-        trajectory_data: DataFrame with trajectory data
-        state_name: Name of state variable to plot ('delta_x', 'delta_y', etc.)
-        title: Optional title override
-        save_path: Optional path to save figure
-        show_plot: Whether to display the plot
-    """
-    fig, ax = plt.subplots(figsize=(12, 6))
-    
-    # Extract timesteps
-    timesteps = trajectory_data['timestep']
-    
-    # Extract true and predicted values
-    true_col = f'true_{state_name}'
-    pred_col = f'pred_{state_name}'
-    
-    if true_col not in trajectory_data or pred_col not in trajectory_data:
-        print(f"Warning: State {state_name} not found in trajectory data")
-        return
-    
-    true_values = trajectory_data[true_col]
-    pred_values = trajectory_data[pred_col]
-    
-    # Extract robot and sample info
-    robot_idx = trajectory_data['robot_idx'].iloc[0] if 'robot_idx' in trajectory_data.columns else '?'
-    sample_idx = trajectory_data['sample_idx'].iloc[0] if 'sample_idx' in trajectory_data.columns else '?'
-    
-    # Create default title if not provided
-    if title is None:
-        title = f"Robot {robot_idx} - {state_name} Comparison (Sample {sample_idx})"
-    
-    # Plot state values
-    ax.plot(timesteps, true_values, 'b-', linewidth=2, label='Ground Truth')
-    ax.plot(timesteps, pred_values, 'r--', linewidth=2, label='Predicted')
-    
-    # Calculate error statistics
-    error = np.abs(true_values - pred_values)
-    rmse = np.sqrt(np.mean(error**2))
-    
-    # Formatting
-    ax.set_xlabel('Time (s)', fontsize=14)
-    ax.set_ylabel(state_name, fontsize=14)
-    ax.set_title(title, fontsize=16)
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=12)
-    
-    # Add statistics
-    stats_text = f"RMSE: {rmse:.4f}"
-    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
-           verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
-           fontsize=12)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"State comparison saved to {save_path}")
-    
-    if show_plot:
-        plt.show()
-    else:
-        plt.close(fig)
-
-
-def plot_comprehensive_states(trajectory_data: pd.DataFrame,
-                             save_path: Optional[str] = None,
-                             show_plot: bool = True) -> None:
-    """
-    Create a comprehensive plot showing all state variables.
-    
-    Args:
-        trajectory_data: DataFrame with trajectory data
-        save_path: Optional path to save figure
-        show_plot: Whether to display the plot
-    """
-    fig, axes = plt.subplots(4, 2, figsize=(15, 16))
-    axes = axes.flatten()
-    
-    # Extract timesteps
-    timesteps = trajectory_data['timestep']
-    
-    # State variables to plot
-    state_names = ['delta_x', 'delta_y', 'yaw', 'steering', 
-                  'velocity', 'side_slip', 'yaw_rate']
-    
-    # Plot trajectory in last subplot
-    ax_traj = axes[7]
-    ax_traj.plot(trajectory_data['true_delta_x'], trajectory_data['true_delta_y'], 
-                'b-', linewidth=2, label='Ground Truth')
-    ax_traj.plot(trajectory_data['pred_delta_x'], trajectory_data['pred_delta_y'], 
-                'r--', linewidth=2, label='Predicted')
-    ax_traj.plot(trajectory_data['true_delta_x'].iloc[0], trajectory_data['true_delta_y'].iloc[0], 
-                'go', markersize=8, label='Start')
-    ax_traj.plot(trajectory_data['true_delta_x'].iloc[-1], trajectory_data['true_delta_y'].iloc[-1], 
-                'bs', markersize=8, label='End (True)')
-    ax_traj.plot(trajectory_data['pred_delta_x'].iloc[-1], trajectory_data['pred_delta_y'].iloc[-1], 
-                'rs', markersize=8, label='End (Pred)')
-    ax_traj.set_xlabel('Δx (m)')
-    ax_traj.set_ylabel('Δy (m)')
-    ax_traj.set_title('X-Y Trajectory')
-    ax_traj.grid(True, alpha=0.3)
-    ax_traj.axis('equal')
-    ax_traj.legend(loc='upper left')
-    
-    # Plot individual state variables
-    for i, state_name in enumerate(state_names):
-        ax = axes[i]
-        true_col = f'true_{state_name}'
-        pred_col = f'pred_{state_name}'
-        
-        if true_col in trajectory_data and pred_col in trajectory_data:
-            ax.plot(timesteps, trajectory_data[true_col], 'b-', linewidth=2, label='Ground Truth')
-            ax.plot(timesteps, trajectory_data[pred_col], 'r--', linewidth=2, label='Predicted')
-            
-            # Calculate error statistics
-            error = np.abs(trajectory_data[true_col] - trajectory_data[pred_col])
-            rmse = np.sqrt(np.mean(error**2))
-            
-            ax.set_xlabel('Time (s)')
-            ax.set_ylabel(state_name)
-            ax.set_title(f'{state_name} (RMSE: {rmse:.4f})')
-            ax.grid(True, alpha=0.3)
-            if i == 0:
-                ax.legend()
-    
-    # Extract robot and sample info
-    robot_idx = trajectory_data['robot_idx'].iloc[0] if 'robot_idx' in trajectory_data.columns else '?'
-    sample_idx = trajectory_data['sample_idx'].iloc[0] if 'sample_idx' in trajectory_data.columns else '?'
-    
-    fig.suptitle(f'Robot {robot_idx} - Comprehensive State Comparison (Sample {sample_idx})', 
-                fontsize=18, y=1.0)
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Comprehensive state plot saved to {save_path}")
-    
-    if show_plot:
-        plt.show()
-    else:
-        plt.close(fig)
-
-
-def plot_position_error(trajectory_data: pd.DataFrame,
-                       save_path: Optional[str] = None,
-                       show_plot: bool = True) -> None:
-    """
-    Plot position error over time.
-    
-    Args:
-        trajectory_data: DataFrame with trajectory data
-        save_path: Optional path to save figure
-        show_plot: Whether to display the plot
-    """
-    fig, ax = plt.subplots(figsize=(12, 6))
-    
-    # Extract timesteps and position error
-    timesteps = trajectory_data['timestep']
-    pos_error = trajectory_data['pos_error']
-    
-    # Extract robot and sample info
-    robot_idx = trajectory_data['robot_idx'].iloc[0] if 'robot_idx' in trajectory_data.columns else '?'
-    sample_idx = trajectory_data['sample_idx'].iloc[0] if 'sample_idx' in trajectory_data.columns else '?'
-    
-    # Plot error
-    ax.plot(timesteps, pos_error, 'r-', linewidth=2)
-    ax.fill_between(timesteps, 0, pos_error, alpha=0.2, color='red')
-    
-    # Calculate statistics
-    mean_error = pos_error.mean()
-    max_error = pos_error.max()
-    final_error = pos_error.iloc[-1]
-    
-    # Formatting
-    ax.set_xlabel('Time (s)', fontsize=14)
-    ax.set_ylabel('Position Error (m)', fontsize=14)
-    ax.set_title(f'Robot {robot_idx} - Position Error Over Time (Sample {sample_idx})', fontsize=16)
-    ax.grid(True, alpha=0.3)
-    
-    # Add statistics text box
-    stats_text = f"Mean Error: {mean_error:.3f}m\nMax Error: {max_error:.3f}m\nFinal Error: {final_error:.3f}m"
-    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
-           verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
-           fontsize=12)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Position error plot saved to {save_path}")
-    
-    if show_plot:
-        plt.show()
-    else:
-        plt.close(fig)
-
-
-# ============================================================================
-# SUMMARY AND AGGREGATE PLOTTING FUNCTIONS
-# ============================================================================
-
-def plot_metrics_summary(metrics_files: List[str],
-                        save_path: Optional[str] = None,
-                        show_plot: bool = True) -> None:
-    """
-    Create summary plot of metrics across multiple samples.
-    
-    Args:
-        metrics_files: List of metrics JSON files
-        save_path: Optional path to save figure
-        show_plot: Whether to display the plot
-    """
-    # Load metrics from all files
-    all_metrics = []
-    for file_path in metrics_files:
-        # Convert to string if it's a Path object
-        file_str = str(file_path)
-        
-        # Skip summary metrics files
-        if "summary" in file_str:
-            continue
-            
-        try:
-            metrics = load_metrics(file_str)
-            # Extract robot and sample IDs from filename
-            parts = os.path.basename(file_str).split('_')
-            dataset = parts[0]
-            
-            # Make sure this is a regular metrics file with robot and sample info
-            if len(parts) >= 3 and "robot" in parts[1] and "sample" in parts[2]:
-                robot_idx = int(parts[1].replace('robot', ''))
-                sample_idx = int(parts[2].replace('sample', ''))
-                
-                metrics['robot_idx'] = robot_idx
-                metrics['sample_idx'] = sample_idx
-                metrics['dataset'] = dataset
-                all_metrics.append(metrics)
-            else:
-                print(f"Skipping non-standard metrics file: {file_str}")
-        except (ValueError, IndexError) as e:
-            print(f"Error processing metrics file {file_str}: {e}")
-            continue
-    
-    # Check if we have any valid metrics
-    if not all_metrics:
-        print("No valid metrics files found for summary plot.")
-        return
-        
-    # Convert to DataFrame for easier analysis
-    metrics_df = pd.DataFrame(all_metrics)
-    
-    # Create figure with subplots
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    
-    # 1. Position errors by robot
-    ax = axes[0, 0]
-    robot_position_errors = metrics_df.groupby('robot_idx')['mean_pos_error'].agg(['mean', 'std'])
-    robot_position_errors.plot(kind='bar', y='mean', yerr='std', ax=ax, legend=False)
-    ax.set_xlabel('Robot ID')
-    ax.set_ylabel('Mean Position Error (m)')
-    ax.set_title('Position Error by Robot')
-    ax.grid(True, alpha=0.3)
-    
-    # 2. Distribution of position errors
-    ax = axes[0, 1]
-    sns.histplot(metrics_df['mean_pos_error'], kde=True, ax=ax)
-    ax.set_xlabel('Mean Position Error (m)')
-    ax.set_ylabel('Count')
-    ax.set_title('Distribution of Position Errors')
-    ax.grid(True, alpha=0.3)
-    
-    # 3. MSE by state variable
-    ax = axes[1, 0]
-    state_names = ['delta_x', 'delta_y', 'yaw', 'steering', 'velocity', 'side_slip', 'yaw_rate']
-    state_rmse = [metrics_df[f'rmse_{state}'].mean() for state in state_names]
-    
-    ax.bar(state_names, state_rmse)
-    ax.set_xlabel('State Variable')
-    ax.set_ylabel('RMSE')
-    ax.set_title('Average RMSE by State Variable')
-    ax.set_xticklabels(state_names, rotation=45)
-    ax.grid(True, alpha=0.3)
-    
-    # 4. Position error vs. final error
-    ax = axes[1, 1]
-    ax.scatter(metrics_df['mean_pos_error'], metrics_df['final_pos_error'], alpha=0.5)
-    ax.set_xlabel('Mean Position Error (m)')
-    ax.set_ylabel('Final Position Error (m)')
-    ax.set_title('Mean vs. Final Position Error')
-    ax.grid(True, alpha=0.3)
-    
-    # Add line of equality
-    min_val = min(metrics_df['mean_pos_error'].min(), metrics_df['final_pos_error'].min())
-    max_val = max(metrics_df['mean_pos_error'].max(), metrics_df['final_pos_error'].max())
-    ax.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.5)
-    
-    # Add overall title
-    plt.suptitle(f'Metrics Summary ({len(all_metrics)} Valid Samples)', fontsize=16)
-    plt.tight_layout(rect=[0, 0, 1, 0.97])
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Metrics summary plot saved to {save_path}")
-    
-    if show_plot:
-        plt.show()
-    else:
-        plt.close(fig)
-
-
-def plot_error_time_analysis(trajectory_files: List[str], 
-                           num_samples: int = 5,
-                           save_path: Optional[str] = None,
-                           show_plot: bool = True) -> None:
-    """
-    Analyze how position error changes over time across multiple trajectories.
-    
-    Args:
-        trajectory_files: List of trajectory CSV files
-        num_samples: Number of individual samples to plot
-        save_path: Optional path to save figure
-        show_plot: Whether to display the plot
-    """
-    # Create figure
-    fig, ax = plt.subplots(figsize=(12, 8))
-    
-    # List to store average error over time
-    all_errors = []
+# ----------------------------------------------------------------------------- #
+# Plotting Functions                                                            #
+# ----------------------------------------------------------------------------- #
+def plot_xy_trajectories(df: pd.DataFrame, max_trajs: int = 20, save_path: Optional[Path] = None):
+    """Plot 2D trajectory paths (x-y plane)."""
+    df_sample = sample_trajectories(df, max_trajs)
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
     
     # Plot individual trajectories
-    for i, file_path in enumerate(trajectory_files[:num_samples]):
-        traj_data = load_trajectory_data(file_path)
+    for (batch, traj), group in df_sample.groupby(['batch', 'traj']):
+        alpha = min(0.7, 20 / max_trajs)  # Adjust transparency based on number of trajectories
         
-        # Extract robot index from filename
-        parts = os.path.basename(file_path).split('_')
-        robot_idx = parts[1].replace('robot', '')
-        
-        # Plot position error
-        if i == 0:
-            ax.plot(traj_data['timestep'], traj_data['pos_error'], 'k-', alpha=0.3, label='Individual Samples')
-        else:
-            ax.plot(traj_data['timestep'], traj_data['pos_error'], 'k-', alpha=0.3)
-        
-        # Store for computing average
-        all_errors.append(traj_data['pos_error'].values)
+        ax1.plot(group['true_delta_x'], group['true_delta_y'], 
+                'k-', alpha=alpha, linewidth=1, label='True' if (batch, traj) == (0, 0) else None)
+        ax1.plot(group['pred_delta_x'], group['pred_delta_y'], 
+                'r--', alpha=alpha, linewidth=1, label='Predicted' if (batch, traj) == (0, 0) else None)
     
-    # Compute average error over time
-    if len(all_errors) > 0:
-        # Find the minimum length to ensure alignment
-        min_length = min(len(err) for err in all_errors)
-        # Truncate all errors to the minimum length
-        all_errors = [err[:min_length] for err in all_errors]
-        # Stack and compute mean
-        mean_error = np.mean(all_errors, axis=0)
-        std_error = np.std(all_errors, axis=0)
-        
-        # Create time array for the mean error
-        time = traj_data['timestep'].values[:min_length]
-        
-        # Plot average error
-        ax.plot(time, mean_error, 'r-', linewidth=3, label='Mean Error')
-        ax.fill_between(time, mean_error - std_error, mean_error + std_error, 
-                       alpha=0.2, color='red', label='±1 Std Dev')
+    ax1.set_xlabel('Δx [m]')
+    ax1.set_ylabel('Δy [m]')
+    ax1.set_title(f'Vehicle Trajectories (Sample of {len(df_sample.groupby(["batch", "traj"]))} trajectories)')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.set_aspect('equal', adjustable='box')
     
-    # Formatting
-    ax.set_xlabel('Time (s)', fontsize=14)
-    ax.set_ylabel('Position Error (m)', fontsize=14)
-    ax.set_title('Position Error vs. Time Analysis', fontsize=16)
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=12)
+    # Plot error magnitude over trajectories
+    df_sample['position_error'] = np.sqrt(df_sample['err_delta_x']**2 + df_sample['err_delta_y']**2)
+    
+    for (batch, traj), group in df_sample.groupby(['batch', 'traj']):
+        ax2.plot(group['step'], group['position_error'], alpha=0.6, linewidth=1)
+    
+    # Add mean error trend
+    mean_error = df_sample.groupby('step')['position_error'].mean()
+    ax2.plot(mean_error.index, mean_error.values, 'r-', linewidth=3, 
+             label=f'Mean Error (Final: {mean_error.iloc[-1]:.3f}m)')
+    
+    ax2.set_xlabel('Time Step')
+    ax2.set_ylabel('Position Error [m]')
+    ax2.set_title('Position Error Evolution')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
     
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Error time analysis saved to {save_path}")
+        print(f"Saved XY trajectories plot to {save_path}")
     
-    if show_plot:
-        plt.show()
-    else:
-        plt.close(fig)
+    plt.show()
 
-
-def plot_dataset_comparison(test_metrics: List[str], val_metrics: List[str], 
-                          save_path: Optional[str] = None,
-                          show_plot: bool = True) -> None:
-    """
-    Compare metrics between test and validation datasets.
+def plot_state_time_series(df: pd.DataFrame, max_trajs: int = 10, save_path: Optional[Path] = None):
+    """Plot all state variables over time."""
+    df_sample = sample_trajectories(df, max_trajs)
     
-    Args:
-        test_metrics: List of test dataset metric files
-        val_metrics: List of validation dataset metric files
-        save_path: Optional path to save figure
-        show_plot: Whether to display the plot
-    """
-    # Load test metrics
-    test_data = []
-    for file_path in test_metrics:
-        metrics = load_metrics(file_path)
-        metrics['dataset'] = 'test'
-        test_data.append(metrics)
+    fig, axes = plt.subplots(4, 2, figsize=(16, 20))
+    axes = axes.flatten()
     
-    # Load validation metrics
-    val_data = []
-    for file_path in val_metrics:
-        metrics = load_metrics(file_path)
-        metrics['dataset'] = 'validation'
-        val_data.append(metrics)
+    for i, (state, unit, label) in enumerate(zip(STATE_NAMES, STATE_UNITS, STATE_LABELS)):
+        if i >= len(axes):
+            break
+            
+        ax = axes[i]
+        
+        # Plot individual trajectories
+        for (batch, traj), group in df_sample.groupby(['batch', 'traj']):
+            alpha = 0.5
+            ax.plot(group['time'], group[f'true_{state}'], 'k-', alpha=alpha, linewidth=1,
+                   label='True' if (batch, traj) == (0, 0) else None)
+            ax.plot(group['time'], group[f'pred_{state}'], 'r--', alpha=alpha, linewidth=1,
+                   label='Predicted' if (batch, traj) == (0, 0) else None)
+        
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel(label)
+        ax.set_title(f'{state.replace("_", " ").title()} Prediction')
+        ax.grid(True, alpha=0.3)
+        
+        if i == 0:  # Add legend to first subplot
+            ax.legend()
     
-    # Combine datasets
-    all_data = pd.DataFrame(test_data + val_data)
+    # Remove empty subplot if odd number of states
+    if len(STATE_NAMES) < len(axes):
+        axes[-1].remove()
     
-    # Create figure with subplots
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    
-    # 1. MSE comparison
-    ax = axes[0, 0]
-    sns.boxplot(x='dataset', y='mse', data=all_data, ax=ax)
-    ax.set_xlabel('Dataset')
-    ax.set_ylabel('MSE')
-    ax.set_title('MSE Comparison')
-    ax.grid(True, alpha=0.3)
-    
-    # 2. Position error comparison
-    ax = axes[0, 1]
-    sns.boxplot(x='dataset', y='mean_pos_error', data=all_data, ax=ax)
-    ax.set_xlabel('Dataset')
-    ax.set_ylabel('Mean Position Error (m)')
-    ax.set_title('Position Error Comparison')
-    ax.grid(True, alpha=0.3)
-    
-    # 3. Final position error comparison
-    ax = axes[1, 0]
-    sns.boxplot(x='dataset', y='final_pos_error', data=all_data, ax=ax)
-    ax.set_xlabel('Dataset')
-    ax.set_ylabel('Final Position Error (m)')
-    ax.set_title('Final Position Error Comparison')
-    ax.grid(True, alpha=0.3)
-    
-    # 4. Max position error comparison
-    ax = axes[1, 1]
-    sns.boxplot(x='dataset', y='max_pos_error', data=all_data, ax=ax)
-    ax.set_xlabel('Dataset')
-    ax.set_ylabel('Max Position Error (m)')
-    ax.set_title('Max Position Error Comparison')
-    ax.grid(True, alpha=0.3)
-    
-    # Add overall title
-    plt.suptitle('Test vs. Validation Dataset Comparison', fontsize=16)
-    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.suptitle(f'State Variables Over Time (Sample of {len(df_sample.groupby(["batch", "traj"]))} trajectories)', 
+                 fontsize=16, y=0.995)
+    plt.tight_layout()
     
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Dataset comparison saved to {save_path}")
+        print(f"Saved state time series plot to {save_path}")
     
-    if show_plot:
-        plt.show()
+    plt.show()
+
+def plot_error_analysis(df: pd.DataFrame, save_path: Optional[Path] = None):
+    """Comprehensive error analysis plots."""
+    fig = plt.figure(figsize=(20, 12))
+    gs = GridSpec(3, 4, figure=fig)
+    
+    # 1. Error distribution for each state
+    ax1 = fig.add_subplot(gs[0, :2])
+    error_data = [df[f'err_{state}'].values for state in STATE_NAMES]
+    bp = ax1.boxplot(error_data, labels=[s.replace('_', '\n') for s in STATE_NAMES], patch_artist=True)
+    
+    # Color the boxes
+    colors = plt.cm.Set3(np.linspace(0, 1, len(STATE_NAMES)))
+    for patch, color in zip(bp['boxes'], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+    
+    ax1.set_title('Error Distribution by State Variable')
+    ax1.set_ylabel('Error Magnitude')
+    ax1.grid(True, alpha=0.3)
+    
+    # 2. Error evolution over time steps
+    ax2 = fig.add_subplot(gs[0, 2:])
+    for state in STATE_NAMES:
+        mean_abs_error = df.groupby('step')[f'err_{state}'].apply(lambda x: np.mean(np.abs(x)))
+        ax2.plot(mean_abs_error.index, mean_abs_error.values, label=state, marker='o', markersize=3)
+    
+    ax2.set_xlabel('Time Step')
+    ax2.set_ylabel('Mean Absolute Error')
+    ax2.set_title('Error Evolution Over Time')
+    ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax2.grid(True, alpha=0.3)
+    
+    # 3. Position error 2D histogram
+    ax3 = fig.add_subplot(gs[1, :2])
+    h = ax3.hist2d(df['err_delta_x'], df['err_delta_y'], bins=50, cmap='Blues')
+    ax3.set_xlabel('X Position Error [m]')
+    ax3.set_ylabel('Y Position Error [m]')
+    ax3.set_title('2D Position Error Distribution')
+    plt.colorbar(h[3], ax=ax3, label='Count')
+    ax3.set_aspect('equal', adjustable='box')
+    
+    # 4. Error vs time step scatter
+    ax4 = fig.add_subplot(gs[1, 2:])
+    position_error = np.sqrt(df['err_delta_x']**2 + df['err_delta_y']**2)
+    scatter = ax4.scatter(df['step'], position_error, c=df['batch'], alpha=0.5, s=1, cmap='viridis')
+    ax4.set_xlabel('Time Step')
+    ax4.set_ylabel('Position Error [m]')
+    ax4.set_title('Position Error vs Time Step (colored by batch)')
+    plt.colorbar(scatter, ax=ax4, label='Batch ID')
+    ax4.grid(True, alpha=0.3)
+    
+    # 5. Final vs initial error comparison
+    ax5 = fig.add_subplot(gs[2, :2])
+    initial_errors = df[df['step'] == 0].groupby(['batch', 'traj']).apply(
+        lambda x: np.sqrt(x['err_delta_x'].iloc[0]**2 + x['err_delta_y'].iloc[0]**2)).values
+    final_errors = df.groupby(['batch', 'traj']).apply(
+        lambda x: np.sqrt(x['err_delta_x'].iloc[-1]**2 + x['err_delta_y'].iloc[-1]**2)).values
+    
+    ax5.scatter(initial_errors, final_errors, alpha=0.6, s=20)
+    ax5.plot([0, max(initial_errors.max(), final_errors.max())], 
+             [0, max(initial_errors.max(), final_errors.max())], 'r--', alpha=0.5)
+    ax5.set_xlabel('Initial Position Error [m]')
+    ax5.set_ylabel('Final Position Error [m]')
+    ax5.set_title('Final vs Initial Position Error')
+    ax5.grid(True, alpha=0.3)
+    ax5.set_aspect('equal', adjustable='box')
+    
+    # 6. Error statistics table
+    ax6 = fig.add_subplot(gs[2, 2:])
+    ax6.axis('off')
+    
+    # Calculate statistics
+    stats_data = []
+    for state in STATE_NAMES:
+        errors = df[f'err_{state}'].values
+        stats_data.append([
+            state.replace('_', ' ').title(),
+            f"{np.mean(np.abs(errors)):.4f}",
+            f"{np.std(errors):.4f}",
+            f"{np.sqrt(np.mean(errors**2)):.4f}",
+            f"{np.percentile(np.abs(errors), 95):.4f}"
+        ])
+    
+    table = ax6.table(cellText=stats_data,
+                     colLabels=['State', 'MAE', 'Std', 'RMSE', '95th %ile'],
+                     cellLoc='center',
+                     loc='center',
+                     bbox=[0, 0, 1, 1])
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 2)
+    ax6.set_title('Error Statistics Summary', pad=20)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved error analysis plot to {save_path}")
+    
+    plt.show()
+
+def plot_velocity_analysis(df: pd.DataFrame, max_trajs: int = 15, save_path: Optional[Path] = None):
+    """Specialized analysis for velocity predictions."""
+    df_sample = sample_trajectories(df, max_trajs)
+    
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # 1. Velocity trajectories
+    ax1 = axes[0, 0]
+    for (batch, traj), group in df_sample.groupby(['batch', 'traj']):
+        ax1.plot(group['time'], group['true_velocity'], 'k-', alpha=0.5, linewidth=1,
+                label='True' if (batch, traj) == (0, 0) else None)
+        ax1.plot(group['time'], group['pred_velocity'], 'r--', alpha=0.5, linewidth=1,
+                label='Predicted' if (batch, traj) == (0, 0) else None)
+    
+    ax1.set_xlabel('Time [s]')
+    ax1.set_ylabel('Velocity [m/s]')
+    ax1.set_title('Velocity Predictions Over Time')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # 2. Velocity prediction scatter
+    ax2 = axes[0, 1]
+    ax2.scatter(df['true_velocity'], df['pred_velocity'], alpha=0.3, s=1)
+    
+    v_min, v_max = df[['true_velocity', 'pred_velocity']].min().min(), df[['true_velocity', 'pred_velocity']].max().max()
+    ax2.plot([v_min, v_max], [v_min, v_max], 'r--', alpha=0.8, linewidth=2)
+    ax2.set_xlabel('True Velocity [m/s]')
+    ax2.set_ylabel('Predicted Velocity [m/s]')
+    ax2.set_title('Velocity Prediction Accuracy')
+    ax2.grid(True, alpha=0.3)
+    ax2.set_aspect('equal', adjustable='box')
+    
+    # 3. Velocity error over time
+    ax3 = axes[1, 0]
+    velocity_error_mean = df.groupby('step')['err_velocity'].apply(lambda x: np.mean(np.abs(x)))
+    velocity_error_std = df.groupby('step')['err_velocity'].apply(lambda x: np.std(x))
+    
+    ax3.plot(velocity_error_mean.index, velocity_error_mean.values, 'b-', linewidth=2, label='Mean |Error|')
+    ax3.fill_between(velocity_error_mean.index, 
+                     velocity_error_mean.values - velocity_error_std.values,
+                     velocity_error_mean.values + velocity_error_std.values,
+                     alpha=0.3, label='±1 std')
+    ax3.set_xlabel('Time Step')
+    ax3.set_ylabel('Velocity Error [m/s]')
+    ax3.set_title('Velocity Error Evolution')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # 4. Velocity error distribution
+    ax4 = axes[1, 1]
+    ax4.hist(df['err_velocity'], bins=50, alpha=0.7, density=True, edgecolor='black')
+    ax4.axvline(0, color='red', linestyle='--', linewidth=2, label='Zero Error')
+    ax4.axvline(df['err_velocity'].mean(), color='green', linestyle='-', linewidth=2, 
+               label=f'Mean: {df["err_velocity"].mean():.4f}')
+    ax4.set_xlabel('Velocity Error [m/s]')
+    ax4.set_ylabel('Density')
+    ax4.set_title('Velocity Error Distribution')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved velocity analysis plot to {save_path}")
+    
+    plt.show()
+
+def plot_yaw_analysis(df: pd.DataFrame, max_trajs: int = 15, save_path: Optional[Path] = None):
+    """Specialized analysis for yaw angle predictions."""
+    df_sample = sample_trajectories(df, max_trajs)
+    
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # 1. Yaw trajectories
+    ax1 = axes[0, 0]
+    for (batch, traj), group in df_sample.groupby(['batch', 'traj']):
+        ax1.plot(group['time'], group['true_yaw'], 'k-', alpha=0.5, linewidth=1,
+                label='True' if (batch, traj) == (0, 0) else None)
+        ax1.plot(group['time'], group['pred_yaw'], 'r--', alpha=0.5, linewidth=1,
+                label='Predicted' if (batch, traj) == (0, 0) else None)
+    
+    ax1.set_xlabel('Time [s]')
+    ax1.set_ylabel('Yaw [rad]')
+    ax1.set_title('Yaw Angle Predictions Over Time')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # 2. Yaw error (wrapped) histogram
+    ax2 = axes[0, 1]
+    yaw_errors = df['err_yaw'].values
+    ax2.hist(yaw_errors, bins=50, alpha=0.7, density=True, edgecolor='black')
+    ax2.axvline(0, color='red', linestyle='--', linewidth=2, label='Zero Error')
+    ax2.axvline(yaw_errors.mean(), color='green', linestyle='-', linewidth=2,
+               label=f'Mean: {yaw_errors.mean():.4f} rad')
+    ax2.set_xlabel('Yaw Error [rad]')
+    ax2.set_ylabel('Density')
+    ax2.set_title('Yaw Error Distribution (Wrapped)')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # 3. Yaw error over time
+    ax3 = axes[1, 0]
+    yaw_error_mean = df.groupby('step')['err_yaw'].apply(lambda x: np.mean(np.abs(x)))
+    yaw_error_std = df.groupby('step')['err_yaw'].apply(lambda x: np.std(x))
+    
+    ax3.plot(yaw_error_mean.index, yaw_error_mean.values, 'b-', linewidth=2, label='Mean |Error|')
+    ax3.fill_between(yaw_error_mean.index,
+                     yaw_error_mean.values - yaw_error_std.values,
+                     yaw_error_mean.values + yaw_error_std.values,
+                     alpha=0.3, label='±1 std')
+    ax3.set_xlabel('Time Step')
+    ax3.set_ylabel('Yaw Error [rad]')
+    ax3.set_title('Yaw Error Evolution')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # 4. Circular error plot
+    ax4 = axes[1, 1]
+    # Convert to polar coordinates for circular plot
+    theta = np.linspace(0, 2*np.pi, 100)
+    
+    # Plot unit circle
+    ax4.plot(np.cos(theta), np.sin(theta), 'k--', alpha=0.3, label='±π boundary')
+    
+    # Plot errors as points on the circle
+    error_angles = yaw_errors
+    error_radii = np.ones_like(error_angles)  # All errors at unit distance
+    
+    x_errors = error_radii * np.cos(error_angles)
+    y_errors = error_radii * np.sin(error_angles)
+    
+    ax4.scatter(x_errors, y_errors, alpha=0.5, s=20, c=df['step'], cmap='viridis')
+    ax4.set_xlabel('cos(yaw_error)')
+    ax4.set_ylabel('sin(yaw_error)')
+    ax4.set_title('Yaw Errors on Unit Circle')
+    ax4.set_aspect('equal', adjustable='box')
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved yaw analysis plot to {save_path}")
+    
+    plt.show()
+
+def create_summary_report(df: pd.DataFrame, overall_stats: Dict, save_path: Optional[Path] = None):
+    """Create a comprehensive summary report."""
+    fig = plt.figure(figsize=(16, 12))
+    gs = GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
+    
+    # Title
+    fig.suptitle('Hybrid Neural ODE - Test Results Summary Report', fontsize=20, fontweight='bold')
+    
+    # 1. Overall metrics table
+    ax1 = fig.add_subplot(gs[0, :])
+    ax1.axis('off')
+    
+    if overall_stats:
+        metrics_data = [
+            ['Total MSE', f"{overall_stats.get('mse_total', 'N/A'):.6f}"],
+            ['Position RMSE', f"{overall_stats.get('position_rmse', 'N/A'):.4f} m"],
+            ['Position MAE', f"{overall_stats.get('position_mae', 'N/A'):.4f} m"],
+            ['Final Position RMSE', f"{overall_stats.get('final_position_rmse', 'N/A'):.4f} m"],
+            ['Velocity RMSE', f"{overall_stats.get('velocity_rmse', 'N/A'):.4f} m/s"],
+            ['Velocity MAE', f"{overall_stats.get('velocity_mae', 'N/A'):.4f} m/s"],
+        ]
     else:
-        plt.close(fig)
+        # Calculate from data
+        position_error = np.sqrt(df['err_delta_x']**2 + df['err_delta_y']**2)
+        final_position_error = df.groupby(['batch', 'traj']).apply(
+            lambda x: np.sqrt(x['err_delta_x'].iloc[-1]**2 + x['err_delta_y'].iloc[-1]**2))
+        
+        metrics_data = [
+            ['Position RMSE', f"{np.sqrt(np.mean(position_error**2)):.4f} m"],
+            ['Position MAE', f"{np.mean(position_error):.4f} m"],
+            ['Final Position RMSE', f"{np.sqrt(np.mean(final_position_error**2)):.4f} m"],
+            ['Velocity RMSE', f"{np.sqrt(np.mean(df['err_velocity']**2)):.4f} m/s"],
+            ['Velocity MAE', f"{np.mean(np.abs(df['err_velocity'])):.4f} m/s"],
+            ['Yaw RMSE', f"{np.sqrt(np.mean(df['err_yaw']**2)):.4f} rad"],
+        ]
+    
+    table = ax1.table(cellText=metrics_data,
+                     colLabels=['Metric', 'Value'],
+                     cellLoc='center',
+                     loc='center',
+                     bbox=[0.2, 0.3, 0.6, 0.7])
+    table.auto_set_font_size(False)
+    table.set_fontsize(12)
+    table.scale(1, 2)
+    ax1.set_title('Overall Performance Metrics', fontsize=16, pad=20)
+    
+    # 2. Error evolution plot
+    ax2 = fig.add_subplot(gs[1, :2])
+    position_error = np.sqrt(df['err_delta_x']**2 + df['err_delta_y']**2)
+    df_with_pos_error = df.copy()
+    df_with_pos_error['position_error'] = position_error
+    
+    error_evolution = df_with_pos_error.groupby('step')['position_error'].agg(['mean', 'std'])
+    ax2.plot(error_evolution.index, error_evolution['mean'], 'b-', linewidth=2, label='Mean Position Error')
+    ax2.fill_between(error_evolution.index,
+                     error_evolution['mean'] - error_evolution['std'],
+                     error_evolution['mean'] + error_evolution['std'],
+                     alpha=0.3, label='±1 std')
+    ax2.set_xlabel('Time Step')
+    ax2.set_ylabel('Position Error [m]')
+    ax2.set_title('Position Error Evolution Over Time')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # 3. State-wise error comparison
+    ax3 = fig.add_subplot(gs[1, 2])
+    state_rmses = [np.sqrt(np.mean(df[f'err_{state}']**2)) for state in STATE_NAMES]
+    colors = plt.cm.Set3(np.linspace(0, 1, len(STATE_NAMES)))
+    
+    bars = ax3.bar(range(len(STATE_NAMES)), state_rmses, color=colors, alpha=0.7)
+    ax3.set_xticks(range(len(STATE_NAMES)))
+    ax3.set_xticklabels([s.replace('_', '\n') for s in STATE_NAMES], rotation=45, ha='right')
+    ax3.set_ylabel('RMSE')
+    ax3.set_title('RMSE by State Variable')
+    ax3.grid(True, alpha=0.3)
+    
+    # Add value labels on bars
+    for bar, value in zip(bars, state_rmses):
+        height = bar.get_height()
+        ax3.text(bar.get_x() + bar.get_width()/2., height + 0.01*max(state_rmses),
+                f'{value:.3f}', ha='center', va='bottom', fontsize=8)
+    
+    # 4. Data summary statistics
+    ax4 = fig.add_subplot(gs[2, :])
+    ax4.axis('off')
+    
+    # Calculate summary statistics
+    n_batches = df['batch'].nunique()
+    n_trajectories = len(df.groupby(['batch', 'traj']))
+    n_total_points = len(df)
+    time_span = df['time'].max() - df['time'].min()
+    
+    summary_text = f"""
+    Dataset Summary:
+    • Number of batches: {n_batches}
+    • Number of trajectories: {n_trajectories}
+    • Total data points: {n_total_points:,}
+    • Time span: {time_span:.2f} seconds
+    • Average trajectory length: {n_total_points/n_trajectories:.1f} points
+    
+    Model Performance Highlights:
+    • Best performing state: {STATE_NAMES[np.argmin(state_rmses)]} (RMSE: {min(state_rmses):.4f})
+    • Most challenging state: {STATE_NAMES[np.argmax(state_rmses)]} (RMSE: {max(state_rmses):.4f})
+    • Position tracking accuracy: {np.sqrt(np.mean(position_error**2)):.3f} m RMSE
+    • Final position drift: {np.sqrt(np.mean(final_position_error**2)):.3f} m RMSE
+    """
+    
+    ax4.text(0.05, 0.95, summary_text, transform=ax4.transAxes, fontsize=11,
+             verticalalignment='top', fontfamily='monospace',
+             bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved summary report to {save_path}")
+    
+    plt.show()
 
-
-# ============================================================================
-# MAIN VISUALIZATION FUNCTION
-# ============================================================================
-
+# ----------------------------------------------------------------------------- #
+# Main Function                                                                 #
+# ----------------------------------------------------------------------------- #
 def main():
-    """Main visualization script."""
+    """Main function to generate all visualizations."""
     print("=" * 60)
-    print("Hybrid Neural ODE Evaluation Results Visualization")
+    print("Hybrid Neural ODE - Comprehensive Visualization Generator")  
     print("=" * 60)
     
-    # Create output directory for plots
-    plots_dir = "evaluation_plots"
-    os.makedirs(plots_dir, exist_ok=True)
+    # Create output directory
+    OUTPUT_DIR.mkdir(exist_ok=True)
     
-    # Check if evaluation_results directory exists
-    if not os.path.exists("evaluation_results"):
-        print("Error: evaluation_results directory not found.")
-        print("Please run test_model.py first to generate evaluation data.")
-        return
-    
-    # Find evaluation files
-    print("Finding evaluation files...")
-    test_traj_files, test_metrics_files = find_evaluation_files("evaluation_results", "test")
-    val_traj_files, val_metrics_files = find_evaluation_files("evaluation_results", "val")
-    
-    print(f"Found {len(test_traj_files)} test trajectory files and {len(test_metrics_files)} test metrics files")
-    print(f"Found {len(val_traj_files)} validation trajectory files and {len(val_metrics_files)} validation metrics files")
-    
-    # Check if we have summary metrics
-    test_summary_path = "evaluation_results/test_summary_metrics.csv"
-    val_summary_path = "evaluation_results/val_summary_metrics.csv"
-    
-    has_test_summary = os.path.exists(test_summary_path)
-    has_val_summary = os.path.exists(val_summary_path)
-    
-    print(f"Test summary metrics available: {has_test_summary}")
-    print(f"Validation summary metrics available: {has_val_summary}")
-    
-    # Create sample trajectory visualizations
-    if test_traj_files:
-        print("\nCreating sample trajectory visualizations...")
+    try:
+        # Load all data
+        print("Loading test results...")
+        df, overall_stats = load_all_batch_data()
         
-        # Limit to 5 samples for visualization
-        max_samples = min(5, len(test_traj_files))
-        for i, traj_file in enumerate(test_traj_files[:max_samples]):
-            print(f"  Processing {traj_file}...")
-            traj_data = load_trajectory_data(traj_file)
-            
-            # Add sample and robot info to dataframe if not present
-            if 'sample_idx' not in traj_data.columns:
-                filename = os.path.basename(traj_file)
-                parts = filename.split('_')
-                traj_data['robot_idx'] = int(parts[1].replace('robot', ''))
-                traj_data['sample_idx'] = int(parts[2].replace('sample', ''))
-            
-            # Create trajectory comparison plot
-            save_path = os.path.join(plots_dir, f"trajectory_{i}.png")
-            plot_trajectory_comparison(traj_data, save_path=save_path, show_plot=False)
-            
-            # Create comprehensive state plot
-            save_path = os.path.join(plots_dir, f"comprehensive_states_{i}.png")
-            plot_comprehensive_states(traj_data, save_path=save_path, show_plot=False)
-            
-            # Create position error plot
-            save_path = os.path.join(plots_dir, f"position_error_{i}.png")
-            plot_position_error(traj_data, save_path=save_path, show_plot=False)
-    
-    # Create metrics summaries
-    if test_metrics_files:
-        print("\nCreating metrics summaries...")
+        print(f"Dataset overview:")
+        print(f"  - {df['batch'].nunique()} batches")
+        print(f"  - {len(df.groupby(['batch', 'traj']))} trajectories") 
+        print(f"  - {len(df):,} total data points")
+        print()
         
-        # Filter out summary metrics files and convert to strings
-        test_metrics_files_filtered = [str(f) for f in test_metrics_files if "summary" not in str(f)]
-    
-        # Test metrics summary
-        if test_metrics_files_filtered:
-            save_path = os.path.join(plots_dir, "test_metrics_summary.png")
-            plot_metrics_summary(test_metrics_files_filtered, save_path=save_path, show_plot=False)
-        else:
-            print("No valid metrics files found after filtering.")
+        # Generate all visualizations
+        print("Generating visualizations...")
         
-        # Error time analysis
-        save_path = os.path.join(plots_dir, "error_time_analysis.png")
-        plot_error_time_analysis(test_traj_files, save_path=save_path, show_plot=False)
-    
-    # Create dataset comparison if we have both test and validation data
-    if test_metrics_files and val_metrics_files:
-        print("\nCreating dataset comparison...")
+        print("1. Creating XY trajectory plots...")  
+        plot_xy_trajectories(df, max_trajs=25, 
+                           save_path=OUTPUT_DIR / "01_xy_trajectories.png")
         
-        # Filter and convert both lists
-        test_metrics_filtered = [str(f) for f in test_metrics_files if "summary" not in str(f)]
-        val_metrics_filtered = [str(f) for f in val_metrics_files if "summary" not in str(f)]
+        print("2. Creating state time series plots...")
+        plot_state_time_series(df, max_trajs=15,
+                             save_path=OUTPUT_DIR / "02_state_time_series.png")
         
-        if test_metrics_filtered and val_metrics_filtered:
-            save_path = os.path.join(plots_dir, "dataset_comparison.png")
-            plot_dataset_comparison(test_metrics_filtered, val_metrics_filtered, 
-                                   save_path=save_path, show_plot=False)
-        else:
-            print("Insufficient filtered metrics files for dataset comparison.")
-    
-    print(f"\nVisualization complete! Plots saved to {plots_dir}/")
-    print("Key visualizations:")
-    print("  - trajectory_*.png: XY path comparisons")
-    print("  - comprehensive_states_*.png: All state variables")
-    print("  - position_error_*.png: Position error over time")
-    print("  - test_metrics_summary.png: Summary of test metrics")
-    print("  - error_time_analysis.png: How errors evolve over time")
-    print("  - dataset_comparison.png: Test vs. validation comparison")
-
+        print("3. Creating comprehensive error analysis...")
+        plot_error_analysis(df, save_path=OUTPUT_DIR / "03_error_analysis.png")
+        
+        print("4. Creating velocity analysis...")
+        plot_velocity_analysis(df, max_trajs=20,
+                             save_path=OUTPUT_DIR / "04_velocity_analysis.png")
+        
+        print("5. Creating yaw analysis...")
+        plot_yaw_analysis(df, max_trajs=20,
+                        save_path=OUTPUT_DIR / "05_yaw_analysis.png")
+        
+        print("6. Creating summary report...")
+        create_summary_report(df, overall_stats,
+                            save_path=OUTPUT_DIR / "06_summary_report.png")
+        
+        print()
+        print("=" * 60)
+        print("All visualizations completed successfully!")
+        print(f"Results saved to: {OUTPUT_DIR.resolve()}")
+        print("=" * 60)
+        
+        # Print quick statistics
+        position_error = np.sqrt(df['err_delta_x']**2 + df['err_delta_y']**2)
+        print("\nQuick Performance Summary:")
+        print(f"  • Mean position error: {np.mean(position_error):.4f} m")
+        print(f"  • Position RMSE: {np.sqrt(np.mean(position_error**2)):.4f} m")
+        print(f"  • Velocity RMSE: {np.sqrt(np.mean(df['err_velocity']**2)):.4f} m/s")
+        print(f"  • Yaw RMSE: {np.sqrt(np.mean(df['err_yaw']**2)):.4f} rad")
+        
+    except Exception as e:
+        print(f"Error occurred: {e}")
+        print("Please ensure test_model.py has been run and CSV files exist in test_results/")
 
 if __name__ == "__main__":
     main()

@@ -24,10 +24,6 @@ class MLPDynamics(nn.Module):
         x = nn.relu(x)
         x = nn.Dense(64)(x)
         x = nn.relu(x)
-        
-        for _ in range(6):  
-            x = nn.Dense(32)(x)
-            x = nn.relu(x)
         x = nn.Dense(3)(x)
         return x
     
@@ -63,8 +59,9 @@ class HybridODE:
 
 
     def neural_dynamics(self, state, inputs, params=None):
-        input_neural_states = state[3:7]
-        nn_inputs = jnp.concatenate((input_neural_states, inputs))
+        input_neural_states = state[3:7]  # (4,)
+        nn_inputs = jnp.concatenate((input_neural_states, inputs))  # (6,)
+        assert nn_inputs.shape == (6,), f"nn_inputs shape is {nn_inputs.shape}, expected (6,)"
         if params is None:
             params = self.params
         neural_output = self.neural_net.apply(params, nn_inputs)

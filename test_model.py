@@ -1,343 +1,201 @@
-#!/usr/bin/env python3
-"""
-Model Evaluation for Hybrid Neural ODE
-
-Evaluates trained model performance on test data.
-Computes prediction errors and saves trajectory comparison data as CSV files.
-No direct plotting to avoid matplotlib issues in the JAX environment.
-"""
+import json
+import pickle
+from pathlib import Path
+from typing import Dict, Generator, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pandas as pd
 import yaml
-import pickle
-import os
-from pathlib import Path
-from typing import Dict, List, Tuple, Any
 from tqdm import tqdm
 
-from models import HybridODE, create_train_state
+from models import HybridODE                     # your model definition
+
+# ----------------------------------------------------------------------------- #
+# Utility helpers                                                               #
+# ----------------------------------------------------------------------------- #
+def load_config(path: str = "config.yaml") -> Dict:
+    with open(path, "r") as fp:
+        return yaml.safe_load(fp)
 
 
-# ============================================================================
-# MODEL EVALUATION
-# ============================================================================
+def load_test_data(processed_dir: str = "processed_data"
+                   ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
+    proc = Path(processed_dir)
+    test_samples = jnp.array(np.load(proc / "test_data.npz")["samples"])
+    with open(proc / "normalization_params.json") as fp:
+        params = json.load(fp)
+    norm = {k: jnp.array(v) for k, v in params.items()}
+    return test_samples, norm
 
-def compute_metrics(true_states: np.ndarray, pred_states: np.ndarray, 
-                   state_names: List[str]) -> Dict[str, float]:
-    """
-    Compute evaluation metrics between true and predicted states.
-    
-    Args:
-        true_states: Ground truth states (T, state_dim)
-        pred_states: Predicted states (T, state_dim)
-        state_names: Names of state variables
-        
-    Returns:
-        Dictionary of metrics
-    """
-    # Overall metrics
-    mse = np.mean((true_states - pred_states) ** 2)
-    rmse = np.sqrt(mse)
-    
-    # Per-state metrics
-    state_metrics = {}
-    for i, name in enumerate(state_names):
-        state_mse = np.mean((true_states[:, i] - pred_states[:, i]) ** 2)
-        state_rmse = np.sqrt(state_mse)
-        state_metrics[f"rmse_{name}"] = float(state_rmse)
-    
-    # Position error metrics (focus on delta_x and delta_y)
-    pos_error = np.sqrt(
-        (true_states[:, 0] - pred_states[:, 0])**2 + 
-        (true_states[:, 1] - pred_states[:, 1])**2
-    )
-    mean_pos_error = float(np.mean(pos_error))
-    max_pos_error = float(np.max(pos_error))
-    final_pos_error = float(pos_error[-1])
-    
+
+def denorm(x: jnp.ndarray, mean: jnp.ndarray, std: jnp.ndarray) -> jnp.ndarray:
+    return x * std + mean
+
+
+def batch_iter(data: jnp.ndarray, batch: int
+               ) -> Generator[Tuple[jnp.ndarray, int], None, None]:
+    n = data.shape[0]
+    for i in range(0, n, batch):
+        yield data[i:i + batch], i // batch
+
+# ----------------------------------------------------------------------------- #
+# Metric computation                                                            #
+# ----------------------------------------------------------------------------- #
+STATE_NAMES = ["delta_x", "delta_y", "yaw", "steering",
+               "velocity", "side_slip", "yaw_rate"]
+
+
+def yaw_err(pred, true):
+    """Shortest-path angular error."""
+    return ((pred - true + jnp.pi) % (2 * jnp.pi)) - jnp.pi
+
+
+def trajectory_metrics(pred: jnp.ndarray, true: jnp.ndarray) -> Dict:
+    mse_tot = float(jnp.mean((pred - true) ** 2))
+
+    mse_state = {}
+    for idx, name in enumerate(STATE_NAMES):
+        if name == "yaw":
+            mse_state[name] = float(jnp.mean(yaw_err(pred[..., idx],
+                                                     true[..., idx]) ** 2))
+        else:
+            mse_state[name] = float(jnp.mean((pred[..., idx] -
+                                              true[..., idx]) ** 2))
+
+    pos_err = jnp.sqrt((pred[..., 0] - true[..., 0]) ** 2 +
+                       (pred[..., 1] - true[..., 1]) ** 2)
     metrics = {
-        'mse': float(mse),
-        'rmse': float(rmse),
-        'mean_pos_error': mean_pos_error,
-        'max_pos_error': max_pos_error,
-        'final_pos_error': final_pos_error,
-        **state_metrics
+        "mse_total": mse_tot,
+        "mse_per_state": mse_state,
+        "position_rmse": float(jnp.sqrt(jnp.mean(pos_err ** 2))),
+        "position_mae": float(jnp.mean(pos_err)),
+        "final_position_rmse": float(jnp.sqrt(jnp.mean(pos_err[:, -1] ** 2))),
+        "final_position_mae": float(jnp.mean(pos_err[:, -1])),
+        "velocity_rmse": float(jnp.sqrt(
+            jnp.mean((pred[..., 4] - true[..., 4]) ** 2))),
+        "velocity_mae": float(jnp.mean(jnp.abs(pred[..., 4] - true[..., 4])))
     }
-    
     return metrics
 
-
-def evaluate_sample(model: HybridODE, params: Dict, sample: np.ndarray) -> Tuple[Dict, np.ndarray]:
+# ----------------------------------------------------------------------------- #
+# Fast CSV writer (vectorised)                                                  #
+# ----------------------------------------------------------------------------- #
+def save_batch(batch_id: int,
+               pred: jnp.ndarray,
+               true: jnp.ndarray,
+               metrics: Dict,
+               t_vec: np.ndarray,
+               outdir: Path) -> None:
     """
-    Evaluate model on a single multi-step sample.
-    
-    Args:
-        model: Hybrid ODE model
-        params: Model parameters
-        sample: ndarray (9, n_steps)
-        
-    Returns:
-        Tuple of (metrics, predicted_states)
+    Writes a single CSV + JSON for this batch using bulk device→host copy
+    and vectorised DataFrame construction.
     """
-    state_dim = 7
-    input_dim = 2
-    n_steps = sample.shape[1]
-    initial_state = sample[:state_dim, 0]
-    inputs_sequence = sample[state_dim:, :].T  # shape: (n_steps, 2)
-    true_future_states = sample[:state_dim, :].T  # shape: (n_steps, 7)
-    dt = 0.1  # Or load from config if needed
-    
-    # Predict trajectory
-    pred_traj = model.predict_trajectory(params, initial_state, inputs_sequence, dt)
-    
-    # Remove initial state for metrics (if needed)
-    pred_future = np.array(pred_traj)
-    
-    # Compute metrics
-    metrics = compute_metrics(true_future_states, pred_future, ["delta_x", "delta_y", "yaw", "steering", "velocity", "side_slip", "yaw_rate"])
-    
-    return metrics, pred_future
+    outdir.mkdir(exist_ok=True)
 
+    # One device→host copy each (cheap)
+    pred_np = np.asarray(pred)        # shape (B, T, 7)
+    true_np = np.asarray(true)
 
-# ============================================================================
-# DATA EXPORT
-# ============================================================================
+    B, T, _ = pred_np.shape
+    traj_ids = np.repeat(np.arange(B), T)
+    step_ids = np.tile(np.arange(T), B)
+    times    = np.tile(t_vec, B)
 
-def save_trajectory_data(sample_idx: int, robot_idx: int, 
-                        true_trajectory: np.ndarray, pred_trajectory: np.ndarray,
-                        timesteps: np.ndarray, metrics: Dict, dataset: str,
-                        output_dir: str = "evaluation_results"):
-    """
-    Save trajectory comparison data as CSV.
-    
-    Args:
-        sample_idx: Sample index
-        robot_idx: Robot ID
-        true_trajectory: True trajectory (T, state_dim)
-        pred_trajectory: Predicted trajectory (T, state_dim)
-        timesteps: Time values
-        metrics: Evaluation metrics
-        dataset: Dataset name ('train', 'val', or 'test')
-        output_dir: Output directory
-    """
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Save trajectory comparison as CSV
-    csv_path = f"{output_dir}/{dataset}_robot{robot_idx}_sample{sample_idx}_trajectory.csv"
-    
-    with open(csv_path, 'w') as f:
-        # Header
-        f.write("timestep,")
-        f.write("true_delta_x,true_delta_y,true_yaw,true_steering,true_velocity,true_side_slip,true_yaw_rate,")
-        f.write("pred_delta_x,pred_delta_y,pred_yaw,pred_steering,pred_velocity,pred_side_slip,pred_yaw_rate,")
-        f.write("pos_error\n")
-        
-        # Data
-        for i in range(len(timesteps) - 1):  # Skip initial state in timesteps
-            # Calculate position error
-            pos_error = np.sqrt(
-                (true_trajectory[i, 0] - pred_trajectory[i, 0])**2 + 
-                (true_trajectory[i, 1] - pred_trajectory[i, 1])**2
-            )
-            
-            # Write row
-            f.write(f"{timesteps[i+1]:.6f},")
-            
-            # True states
-            for j in range(7):
-                f.write(f"{true_trajectory[i, j]:.6f},")
-            
-            # Predicted states
-            for j in range(7):
-                f.write(f"{pred_trajectory[i, j]:.6f},")
-            
-            # Position error
-            f.write(f"{pos_error:.6f}\n")
-    
-    # Save metrics as JSON
-    metrics_path = f"{output_dir}/{dataset}_robot{robot_idx}_sample{sample_idx}_metrics.json"
-    
-    import json
-    with open(metrics_path, 'w') as f:
-        json.dump(metrics, f, indent=2)
+    flat_pred = pred_np.reshape(-1, 7)
+    flat_true = true_np.reshape(-1, 7)
+    flat_err  = flat_pred - flat_true
+    yaw_idx   = STATE_NAMES.index("yaw")
+    flat_err[:, yaw_idx] = ((flat_err[:, yaw_idx] + np.pi) % (2*np.pi)) - np.pi
 
+    df_dict = {
+        "batch": batch_id,
+        "traj":  traj_ids,
+        "step":  step_ids,
+        "time":  times,
+    }
+    for i, name in enumerate(STATE_NAMES):
+        df_dict[f"pred_{name}"] = flat_pred[:, i]
+        df_dict[f"true_{name}"] = flat_true[:, i]
+        df_dict[f"err_{name}"]  = flat_err[:, i]
 
-def save_summary_metrics(metrics_list: List[Dict], dataset: str, 
-                        output_dir: str = "evaluation_results"):
-    """
-    Save summary metrics for a dataset.
-    
-    Args:
-        metrics_list: List of metrics dictionaries
-        dataset: Dataset name
-        output_dir: Output directory
-    """
-    # Calculate average metrics
-    avg_metrics = {}
-    
-    for key in metrics_list[0].keys():
-        values = [m[key] for m in metrics_list]
-        avg_metrics[key] = {
-            'mean': float(np.mean(values)),
-            'std': float(np.std(values)),
-            'min': float(np.min(values)),
-            'max': float(np.max(values)),
-        }
-    
-    # Save as JSON
-    import json
-    with open(f"{output_dir}/{dataset}_summary_metrics.json", 'w') as f:
-        json.dump(avg_metrics, f, indent=2)
-    
-    # Save as CSV for easy import to other tools
-    with open(f"{output_dir}/{dataset}_summary_metrics.csv", 'w') as f:
-        f.write("metric,mean,std,min,max\n")
-        for key, values in avg_metrics.items():
-            f.write(f"{key},{values['mean']:.6f},{values['std']:.6f},{values['min']:.6f},{values['max']:.6f}\n")
+    pd.DataFrame(df_dict).to_csv(outdir / f"batch_{batch_id}.csv",
+                                 index=False)
 
+    # Save batch-level metrics
+    with open(outdir / f"batch_{batch_id}_metrics.json", "w") as fp:
+        json.dump(metrics, fp, indent=2)
 
-# ============================================================================
-# MAIN EVALUATION PIPELINE
-# ============================================================================
+# ----------------------------------------------------------------------------- #
+# Main routine                                                                  #
+# ----------------------------------------------------------------------------- #
+def main(cfg_path: str = "config.yaml") -> None:
+    cfg = load_config(cfg_path)
+    bs  = cfg["training"]["batch_size"]
+    dt  = 0.1                                # adjust if needed
 
-def evaluate_dataset(model: HybridODE, params: Dict, samples: List[Dict],
-                   state_scaler: Dict, input_scaler: Dict,
-                   dataset_name: str, max_samples: int = None) -> List[Dict]:
-    """
-    Evaluate model on a dataset of samples.
-    
-    Args:
-        model: Hybrid ODE model
-        params: Model parameters
-        samples: List of sample dictionaries
-        state_scaler: State normalization parameters
-        input_scaler: Input normalization parameters
-        dataset_name: Name of dataset for logging
-        max_samples: Maximum number of samples to evaluate
-        
-    Returns:
-        List of metrics dictionaries
-    """
-    print(f"Evaluating {dataset_name} dataset...")
-    
-    # Limit number of samples if specified
-    if max_samples is not None:
-        samples = samples[:max_samples]
-    
-    # Track metrics
-    all_metrics = []
-    
-    # Evaluate each sample
-    for i, sample in enumerate(tqdm(samples, desc=f"Evaluating {dataset_name}")):
-        robot_idx = sample['robot_idx']
-        
-        # Skip if already evaluated
-        output_path = f"evaluation_results/{dataset_name}_robot{robot_idx}_sample{i}_trajectory.csv"
-        if os.path.exists(output_path):
-            print(f"  Sample {i} (Robot {robot_idx}) already evaluated, skipping...")
-            continue
-        
-        # Evaluate sample
-        metrics, pred_trajectory = evaluate_sample(
-            model, params, sample
-        )
-        
-        # Add sample info to metrics
-        metrics['sample_idx'] = i
-        metrics['robot_idx'] = robot_idx
-        
-        # Add to metrics list
-        all_metrics.append(metrics)
-        
-        # Save trajectory data
-        save_trajectory_data(
-            i, robot_idx,
-            sample['future_states'], pred_trajectory,
-            sample['timesteps'], metrics, dataset_name
-        )
-        
-        # Print metrics for a few samples
-        if i < 5 or i % 100 == 0:
-            print(f"  Sample {i} (Robot {robot_idx}): MSE = {metrics['mse']:.6f}, "
-                  f"Position Error = {metrics['mean_pos_error']:.6f}m")
-    
-    # Save summary metrics
-    save_summary_metrics(all_metrics, dataset_name)
-    
-    return all_metrics
+    # --------------------------------------------------------------------- #
+    print("Loading test data …")
+    test_samples, norm = load_test_data()
+    n_steps = test_samples.shape[2]
+    t_vec   = np.arange(n_steps) * dt
 
+    # --------------------------------------------------------------------- #
+    print("Loading trained parameters …")
+    params_path = Path(cfg["data"].get("output_dir", "results")) / \
+                  "model_params.pkl"
+    if not params_path.exists():
+        raise FileNotFoundError(f"model params not found: {params_path}")
+    with open(params_path, "rb") as fp:
+        params = pickle.load(fp)
 
-def load_model(model_path: str, config: Dict) -> Tuple[HybridODE, Dict]:
-    """
-    Load trained model and parameters.
-    
-    Args:
-        model_path: Path to model file
-        config: Configuration dictionary
-        
-    Returns:
-        Tuple of (model, params)
-    """
-    print(f"Loading model from {model_path}...")
-    
-    model = HybridODE(config)
-    with open(model_path, 'rb') as f:
-        params = pickle.load(f)
-    
-    print("Model loaded successfully")
-    
-    return model, params
+    # --------------------------------------------------------------------- #
+    model  = HybridODE(cfg)
+    outdir = Path("test_results")
 
+    print(f"Running inference on {len(jax.devices())} device(s)…")
+    overall = []
 
-def main():
-    """Main evaluation pipeline."""
-    print("=" * 60)
-    print("Hybrid Neural ODE Model Evaluation")
-    print("=" * 60)
-    
-    # Create output directory
-    os.makedirs("evaluation_results", exist_ok=True)
-    
-    # Load configuration
-    with open("config.yaml", 'r') as f:
-        config = yaml.safe_load(f)
-    
-    # Load model
-    model_path = "results/model_params.pkl"  # Use the trained model params
-    model, params = load_model(model_path, config)
-    
-    # Load data samples
-    print("Loading data samples...")
-    test_data = np.load("processed_data/test_data.npz")
-    test_samples = test_data["samples"]
-    print(f"Loaded {len(test_samples)} test samples")
-    
-    # Evaluate on test data
-    print("\nEvaluating on test data...")
-    test_metrics = []
-    for i, sample in enumerate(tqdm(test_samples, desc="Evaluating test")):
-        metrics, pred_traj = evaluate_sample(model, params, sample)
-        test_metrics.append(metrics)
-        # Optionally save trajectory data
-        # save_trajectory_data(i, 0, sample[:7, :].T, pred_traj, np.arange(sample.shape[1]), metrics, "test")
-        if i < 5 or i % 100 == 0:
-            print(f"  Sample {i}: MSE = {metrics['mse']:.6f}, Position Error = {metrics['mean_pos_error']:.6f}m")
-    # Save summary metrics
-    save_summary_metrics(test_metrics, "test")
-    
-    print("\nDetailed metrics saved to evaluation_results/ directory")
-    print("Run visualize_results.py to generate plots from the saved data")
+    for batch, bid in tqdm(batch_iter(test_samples, bs),
+                           total=(test_samples.shape[0] + bs - 1) // bs,
+                           desc="Batches"):
+        st_dim   = 7
+        s0_norm  = batch[:, :st_dim, 0]
+        u_norm   = batch[:, st_dim:, :].transpose(0, 2, 1)
+        gt_norm  = batch[:, :st_dim, :].transpose(0, 2, 1)
 
+        # Forward pass
+        pred_norm = model.predict_batch_trajectories(params, s0_norm,
+                                                     u_norm, dt)
 
-# Helper function to load multistep samples
-def load_multistep_samples(data_path: str = "processed_data"):
-    """Load multi-step prediction samples."""
-    from train import load_multistep_samples as load_samples
-    return load_samples(data_path)
+        # Denormalise
+        pred = denorm(pred_norm, norm["state_mean"], norm["state_std"])
+        gt   = denorm(gt_norm,   norm["state_mean"], norm["state_std"])
 
+        # Metrics + save
+        m = trajectory_metrics(pred, gt)
+        overall.append(m)
+        save_batch(bid, pred, gt, m, t_vec, outdir)
 
+        print(f"[Batch {bid}]  total MSE={m['mse_total']:.6f} "
+              f"Pos RMSE={m['position_rmse']:.4f}")
+
+    # --------------------------------------------------------------------- #
+    # Aggregate statistics
+    agg = {}
+    for key in overall[0]:
+        if key == "mse_per_state":
+            agg[key] = {n: float(np.mean([o[key][n] for o in overall]))
+                        for n in STATE_NAMES}
+        else:
+            agg[key] = float(np.mean([o[key] for o in overall]))
+
+    with open(outdir / "overall_statistics.json", "w") as fp:
+        json.dump(agg, fp, indent=2)
+
+    print("\nFinished!  Results stored in →", outdir.resolve())
+
+# ----------------------------------------------------------------------------- #
 if __name__ == "__main__":
     main()
