@@ -137,6 +137,107 @@ class HybridODE:
 
 
 
+
+
+
+class MLPStatePrediction(nn.Module):
+    @nn.compact
+    def __call__(self, x):
+        # Input expects shape (..., 9) - 7 states + 2 inputs
+        x = nn.Dense(128)(x)
+        x = nn.relu(x)
+        x = nn.Dense(128)(x)
+        x = nn.relu(x)
+        x = nn.Dense(128)(x)
+        x = nn.relu(x)
+        x = nn.Dense(64)(x)
+        x = nn.relu(x)
+        x = nn.Dense(7)(x)  # Output full state instead of 3 derivatives
+        return x
+    
+
+class Node:
+
+    def __init__(self, config):
+        self.config = config
+        self.input_dim = len(config['model']['input_names'])
+        self.physics_states = config['model']['physics_states']
+        self.neural_states = config['model']['neural_states']
+        self.neural_net = MLPStatePrediction()  
+        self.params = self.init_network(jax.random.PRNGKey(0))
+
+    def init_network(self, key):
+        dummy_input = jnp.ones((9,))  
+        params = self.neural_net.init(key, dummy_input)
+        return params
+
+
+    def neural_dynamics(self, state, action, params=None):
+
+        nn_inputs = jnp.concatenate((state, action))  # (9,)
+        assert nn_inputs.shape == (9,), f"nn_inputs shape is {nn_inputs.shape}, expected (9,)"
+        if params is None:
+            params = self.params
+        neural_output = self.neural_net.apply(params, nn_inputs)
+        return neural_output
+    
+
+    def predict_trajectory(self, params, initial_state, inputs_sequence, dt=None):
+        
+        num_steps = inputs_sequence.shape[0]
+        def scan_step(state, action):
+            
+            next_state = self.neural_dynamics(state, action, params)
+            # Enforce yaw wrap
+            next_state = next_state.at[2].set(((next_state[2] + jnp.pi) % (2 * jnp.pi)) - jnp.pi)
+            return next_state, next_state
+
+
+        _, predicted_states = jax.lax.scan(scan_step, initial_state, inputs_sequence[:-1])
+
+        trajectory = jnp.vstack([initial_state, predicted_states])
+        return trajectory
+    
+
+    def predict_trajectory(self, params, initial_state, inputs_sequence, dt):
+        """
+        Roll out the trajectory for num_steps-1 using the given initial state and input sequence,
+        using jax.lax.scan for efficiency. Only predicts up to the last available ground-truth state.
+        Args:
+            initial_state: shape (state_dim,)
+            inputs_sequence: shape (num_steps, input_dim)
+            dt: float, time step
+        Returns:
+            states: shape (num_steps, state_dim)
+        """
+        num_steps = inputs_sequence.shape[0]
+
+        def scan_step(state, t):
+            action = inputs_sequence[t]
+
+            next_state = self.neural_dynamics(state, action, params)
+            next_state = next_state.at[2].set(((next_state[2] + jnp.pi) % (2 * jnp.pi)) - jnp.pi)
+            return next_state, next_state
+
+        
+        indices = jnp.arange(num_steps - 1)
+        _, states = jax.lax.scan(scan_step, initial_state, indices)
+        
+        trajectory = jnp.vstack([initial_state, states])
+        return trajectory
+
+
+    def predict_batch_trajectories(self, params, initial_states, inputs_batch, dt):
+        batch_predict_fn = jax.vmap(lambda s, i: self.predict_trajectory(params, s, i, dt), in_axes=(0, 0))
+        return batch_predict_fn(initial_states, inputs_batch)
+
+
+
+
+
+
+
+
     
 def create_train_state(model, learning_rate, key, weight_decay=0.0):
     """

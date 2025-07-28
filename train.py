@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import json
 
-from models import HybridODE, create_train_state
+from models import HybridODE, create_train_state, Node
 
 
 print(jax.devices())
@@ -220,7 +220,13 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(config['random_seed'])
 
     # Initialize model and train state
-    model = HybridODE(config)
+    if config['model'] == 'HybridODE':
+        model = HybridODE(config)
+        print("Using HybridODE model")
+    else:
+        model = Node(config)
+        print("Using Node model")
+
     train_state = create_train_state(model, learning_rate, key, weight_decay)
     print(f"model params device: {jax.tree_util.tree_leaves(train_state.params)[0].device}")
     # Run training loop

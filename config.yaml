@@ -1,6 +1,9 @@
 # Hybrid Neural ODE Vehicle Dynamics Configuration
 
 # Data paths and splitting
+
+
+model: Node #HybridODE or Node
 data:
   input_dir: "data"
   output_dir: "results/"

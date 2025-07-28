@@ -10,7 +10,7 @@ import pandas as pd
 import yaml
 from tqdm import tqdm
 
-from models import HybridODE                     # your model definition
+from models import HybridODE, Node  # your model definition
 
 # ----------------------------------------------------------------------------- #
 # Utility helpers                                                               #
@@ -131,8 +131,8 @@ def save_batch(batch_id: int,
 # Main routine                                                                  #
 # ----------------------------------------------------------------------------- #
 def main(cfg_path: str = "config.yaml") -> None:
-    cfg = load_config(cfg_path)
-    bs  = cfg["training"]["batch_size"]
+    config = load_config(cfg_path)
+    bs  = config["training"]["batch_size"]
     dt  = 0.1                                # adjust if needed
 
     # --------------------------------------------------------------------- #
@@ -143,7 +143,7 @@ def main(cfg_path: str = "config.yaml") -> None:
 
     # --------------------------------------------------------------------- #
     print("Loading trained parameters …")
-    params_path = Path(cfg["data"].get("output_dir", "results")) / \
+    params_path = Path(config["data"].get("output_dir", "results")) / \
                   "model_params.pkl"
     if not params_path.exists():
         raise FileNotFoundError(f"model params not found: {params_path}")
@@ -151,7 +151,10 @@ def main(cfg_path: str = "config.yaml") -> None:
         params = pickle.load(fp)
 
     # --------------------------------------------------------------------- #
-    model  = HybridODE(cfg)
+    if config['model'] == 'HybridODE':
+        model = HybridODE(config)
+    else:
+        model = Node(config)
     outdir = Path("test_results")
 
     print(f"Running inference on {len(jax.devices())} device(s)…")
