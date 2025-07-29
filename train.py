@@ -124,7 +124,7 @@ def train_step(train_state, batch, model, dt):
 train_step = jax.jit(train_step, static_argnames=["model"])
 
 
-def validate(train_state, val_samples, model, dt, batch_size=20000):
+def validate(train_state, val_samples, model, dt, batch_size):
     """
     Computes average validation loss over all validation samples.
     Args:
@@ -148,7 +148,7 @@ def validate(train_state, val_samples, model, dt, batch_size=20000):
     return float(jnp.mean(jnp.array(losses)))
 
 
-def run_training_loop(train_samples, val_samples, model, train_state, dt, epochs=500, batch_size=20000, validation_interval=10, early_stopping_patience=20):
+def run_training_loop(train_samples, val_samples, model, train_state, dt, epochs, batch_size, validation_interval=10, early_stopping_patience=20, lr_schedule=None, learning_rate=None):
     wandb.init(project="hybrid_ode_training", config={
         "epochs": epochs,
         "batch_size": batch_size,
@@ -165,25 +165,26 @@ def run_training_loop(train_samples, val_samples, model, train_state, dt, epochs
         batch_iter = tqdm(create_minibatches(train_samples, batch_size, shuffle=True),
                          desc=f"Epoch {epoch+1}/{epochs}", leave=False)
         for batch_idx, batch in enumerate(batch_iter):
-            # Debug: check for NaNs/infs in batch data
-            if jnp.isnan(batch).any() or jnp.isinf(batch).any():
-                print(f"[DEBUG] NaN or Inf detected in batch data at epoch {epoch+1}, batch {batch_idx+1}")
-                print(f"Batch min: {batch.min()}, max: {batch.max()}, mean: {batch.mean()}")
-                break
             train_state, loss = train_step(train_state, batch, model, dt)
-            if batch_idx == 0 and epoch == 0:
-                print(f"[DEBUG] First batch loss: {loss}")
-                print(f"[DEBUG] First batch stats: min={batch.min()}, max={batch.max()}, mean={batch.mean()}")
-            if jnp.isnan(loss) or jnp.isinf(loss):
-                print(f"[DEBUG] NaN or Inf detected in loss at epoch {epoch+1}, batch {batch_idx+1}")
-                print(f"Loss value: {loss}")
-                print(f"Batch min: {batch.min()}, max: {batch.max()}, mean: {batch.mean()}")
-                break
             epoch_losses.append(float(loss))
             batch_iter.set_postfix({"batch_loss": float(loss)})
+
         avg_train_loss = np.mean(epoch_losses)
         train_losses.append(avg_train_loss)
-        wandb.log({"train_loss": avg_train_loss, "epoch": epoch+1})
+        # Log learning rate to wandb
+        current_step = int(train_state.step)
+        if lr_schedule is not None:
+            current_lr = float(lr_schedule(current_step))
+        elif learning_rate is not None:
+            current_lr = float(learning_rate)
+        else:
+            current_lr = None  # fallback
+
+        wandb.log({
+            "train_loss": avg_train_loss,
+            "epoch": epoch+1,
+            "learning_rate": current_lr
+        })
         print(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f}")
         if (epoch+1) % validation_interval == 0:
             val_loss = validate(train_state, val_samples, model, dt, batch_size)
@@ -202,6 +203,18 @@ def run_training_loop(train_samples, val_samples, model, train_state, dt, epochs
     return train_state, train_losses, val_losses
 
 
+def get_current_lr(train_state):
+
+    opt_state = train_state.opt_state
+
+    if hasattr(opt_state, 'inner_state'):  
+        step = opt_state.inner_state[0].count
+    else:
+        step = opt_state[0].count
+    
+    return step  
+
+
 if __name__ == "__main__":
     train_samples, val_samples, test_samples = load_data()
     
@@ -210,7 +223,8 @@ if __name__ == "__main__":
     # Load config
     with open("config.yaml", 'r') as f:
         config = yaml.safe_load(f)
-    dt = config['data']['num_multi_step_predictions']
+
+    dt = config['data']['dt']
     batch_size = config['training']['batch_size']
     epochs = config['training']['epochs']
     validation_interval = config['training']['validation_interval']
@@ -219,22 +233,40 @@ if __name__ == "__main__":
     weight_decay = config['training']['weight_decay']
     key = jax.random.PRNGKey(config['random_seed'])
 
+    
+
     # Initialize model and train state
-    if config['model'] == 'HybridODE':
+    if config['model_type'] == 'HybridODE':
         model = HybridODE(config)
         print("Using HybridODE model")
-    else:
+    elif config['model_type'] == 'Node':
         model = Node(config)
         print("Using Node model")
+    else:
+        raise ValueError(f"Unknown model type HybridODE or Node: {config['model_type']}")
 
-    train_state = create_train_state(model, learning_rate, key, weight_decay)
+    # Prepare learning rate schedule if using weight decay (AdamW)
+    lr_schedule = None
+    if weight_decay > 0:
+        lr_schedule = optax.exponential_decay(
+            init_value=learning_rate,
+            transition_steps=100,
+            decay_rate=0.99,
+            staircase=True
+        )
+        train_state = create_train_state(model, learning_rate, key, weight_decay)
+    else:
+        train_state = create_train_state(model, learning_rate, key, weight_decay)
+
     print(f"model params device: {jax.tree_util.tree_leaves(train_state.params)[0].device}")
     # Run training loop
     train_state, train_losses, val_losses = run_training_loop(
         train_samples, val_samples, model, train_state, dt,
         epochs=epochs, batch_size=batch_size,
         validation_interval=validation_interval,
-        early_stopping_patience=early_stopping_patience
+        early_stopping_patience=early_stopping_patience,
+        lr_schedule=lr_schedule,
+        learning_rate=learning_rate
     )
     print("Training complete.")
     print(f"Best validation loss: {min(val_losses) if val_losses else 'N/A'}")

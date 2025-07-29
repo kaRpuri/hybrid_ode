@@ -246,6 +246,13 @@ def process_data(config_path="config.yaml"):
     output_dir.mkdir(exist_ok=True)
     # Load raw data
     states, inputs, timestamps = load_npz_data(config["data"]["input_dir"])
+
+    dt = float(timestamps[1] - timestamps[0])
+    print(f"Calculated dt from timestamps: {dt}")
+    config['data']['dt'] = dt
+    
+    with open(config_path, "w") as f:
+        yaml.dump(config, f)
     
     # Validate data
     validate_data(states, inputs, config)

@@ -1,46 +1,41 @@
-# Hybrid Neural ODE Vehicle Dynamics Configuration
-
-# Data paths and splitting
-
-
-model: Node #HybridODE or Node
 data:
-  input_dir: "data"
-  output_dir: "results/"
-
-  train_ratio: 0.7    # 70% of robots for training
-  val_ratio: 0.15     # 15% of robots for validation  
-  test_ratio: 0.15    # 15% of robots for testing
-
-  num_multi_step_predictions: 10  # Length of prediction horizon
-
-  noise_std: 0.0 
-
-
-# Model architecture
-
+  dt: 0.01666666753590107
+  input_dir: data
+  noise_std: 0.0
+  num_multi_step_predictions: 10
+  output_dir: results/
+  test_ratio: 0.15
+  train_ratio: 0.7
+  val_ratio: 0.15
 model:
-  state_names: ["delta_x", "delta_y", "yaw", "steering", "velocity", "side_slip", "yaw_rate"]
-  input_names: ["acceleration", "steering_rate"]
-  physics_states: [0, 1, 2, 3]  # kinematic equations
-  neural_states: [4, 5, 6]      # neural network
-  
-# Training parameters
-training:
-  learning_rate: 0.0001
-  weight_decay: 0.0001   # L2 regularization
-  epochs: 50
-  batch_size: 20000  # increase batch size as much as gpu fits
-
-  
-  # Training process
-                   # Noise to add during training
-  validation_interval: 10         # How often to validate
-  early_stopping_patience: 20     # Patience for early stopping
-  
-  # For compatibility with old code
-  segment_size: 80                # Not used in multi-step training
-
-# Settings
+  input_names:
+  - acceleration
+  - steering_rate
+  neural_states:
+  - 4
+  - 5
+  - 6
+  physics_states:
+  - 0
+  - 1
+  - 2
+  - 3
+  state_names:
+  - delta_x
+  - delta_y
+  - yaw
+  - steering
+  - velocity
+  - side_slip
+  - yaw_rate
+model_type: HybridODE  # Node of HybridODE
 random_seed: 42
+training:
+  batch_size: 30000
+  early_stopping_patience: 20
+  epochs: 1000
+  learning_rate: 0.001
+  segment_size: 80
+  validation_interval: 10
+  weight_decay: 0.0001
 verbose: true

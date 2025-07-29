@@ -133,13 +133,16 @@ def save_batch(batch_id: int,
 def main(cfg_path: str = "config.yaml") -> None:
     config = load_config(cfg_path)
     bs  = config["training"]["batch_size"]
-    dt  = 0.1                                # adjust if needed
+    dt  = config["data"]["dt"]                     # adjust if needed
 
     # --------------------------------------------------------------------- #
     print("Loading test data …")
     test_samples, norm = load_test_data()
     n_steps = test_samples.shape[2]
     t_vec   = np.arange(n_steps) * dt
+
+
+    outdir = Path("test_results")
 
     # --------------------------------------------------------------------- #
     print("Loading trained parameters …")
@@ -151,11 +154,14 @@ def main(cfg_path: str = "config.yaml") -> None:
         params = pickle.load(fp)
 
     # --------------------------------------------------------------------- #
-    if config['model'] == 'HybridODE':
+    if config['model_type'] == 'HybridODE':
         model = HybridODE(config)
-    else:
+        print("Using HybridODE model")
+    elif config['model_type'] == 'Node':
         model = Node(config)
-    outdir = Path("test_results")
+        print("Using Node model")
+    else:
+        raise ValueError(f"Unknown model type HybridODE or Node: {config['model_type']}")
 
     print(f"Running inference on {len(jax.devices())} device(s)…")
     overall = []

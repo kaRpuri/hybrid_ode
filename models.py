@@ -102,6 +102,25 @@ class HybridODE:
         return next_state
     
 
+    def euler_step(self, state, inputs_t, inputs_t_plus_dt, dt, params=None):
+        """
+        Perform a single Euler integration step for the hybrid ODE.
+        Args:
+            params: neural network parameters
+            state: current state vector
+            inputs_t: inputs at time t
+            inputs_t_plus_dt: (unused, for API compatibility)
+            dt: time step (float)
+        Returns:
+            next_state: state vector after time dt
+        """
+        k1 = self.hybrid_dynamics(state, inputs_t, params)
+   
+        next_state = state + dt * k1
+        # Wrap yaw (index 2) to [-pi, pi] after integration
+        next_state = next_state.at[2].set(((next_state[2] + jnp.pi) % (2 * jnp.pi)) - jnp.pi)
+        return next_state
+
     def predict_trajectory(self, params, initial_state, inputs_sequence, dt):
         """
         Roll out the trajectory for num_steps-1 using the given initial state and input sequence,
@@ -117,8 +136,8 @@ class HybridODE:
 
         def scan_step(state, t):
             current_input = inputs_sequence[t]
-            next_input = inputs_sequence[t + 1]
-            next_state = self.rk4_step(state, current_input, next_input, dt, params)
+            # next_input = inputs_sequence[t + 1]  # Not needed for Euler
+            next_state = self.euler_step(state, current_input, None, dt, params)
             return next_state, next_state
 
         
@@ -182,21 +201,7 @@ class Node:
         return neural_output
     
 
-    def predict_trajectory(self, params, initial_state, inputs_sequence, dt=None):
-        
-        num_steps = inputs_sequence.shape[0]
-        def scan_step(state, action):
-            
-            next_state = self.neural_dynamics(state, action, params)
-            # Enforce yaw wrap
-            next_state = next_state.at[2].set(((next_state[2] + jnp.pi) % (2 * jnp.pi)) - jnp.pi)
-            return next_state, next_state
 
-
-        _, predicted_states = jax.lax.scan(scan_step, initial_state, inputs_sequence[:-1])
-
-        trajectory = jnp.vstack([initial_state, predicted_states])
-        return trajectory
     
 
     def predict_trajectory(self, params, initial_state, inputs_sequence, dt):
@@ -211,6 +216,7 @@ class Node:
             states: shape (num_steps, state_dim)
         """
         num_steps = inputs_sequence.shape[0]
+     
 
         def scan_step(state, t):
             action = inputs_sequence[t]
@@ -252,7 +258,14 @@ def create_train_state(model, learning_rate, key, weight_decay=0.0):
     """
     params = model.init_network(key)
     if weight_decay > 0:
-        optimizer = optax.adamw(learning_rate, weight_decay=weight_decay)
+        # Example: Exponential decay scheduler
+        schedule = optax.exponential_decay(
+            init_value=learning_rate,
+            transition_steps=100,
+            decay_rate=0.99,
+            staircase=True
+        )
+        optimizer = optax.adamw(schedule, weight_decay=weight_decay)
     else:
         optimizer = optax.adam(learning_rate)
     return train_state.TrainState.create(
