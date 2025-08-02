@@ -81,12 +81,19 @@ def loss_function(pred_traj, true_traj):
     yaw_pred = pred_traj[..., 2]
     yaw_true = true_traj[..., 2]
     yaw_error = ((yaw_pred - yaw_true + jnp.pi) % (2 * jnp.pi)) - jnp.pi
+
+
+    # yaw_diff = yaw_pred - yaw_true
+    # yaw_error = jnp.arctan2(jnp.sin(yaw_diff), jnp.cos(yaw_diff))
+
     
     squared_error = (pred_traj - true_traj) ** 2
     
     squared_error = squared_error.at[..., 2].set(yaw_error ** 2)
     
     return jnp.mean(squared_error)
+
+
 
 
 
@@ -171,15 +178,14 @@ def run_training_loop(train_samples, val_samples, model, train_state, dt, epochs
 
         avg_train_loss = np.mean(epoch_losses)
         train_losses.append(avg_train_loss)
-        # Log learning rate to wandb
+     
         current_step = int(train_state.step)
         if lr_schedule is not None:
             current_lr = float(lr_schedule(current_step))
         elif learning_rate is not None:
             current_lr = float(learning_rate)
         else:
-            current_lr = None  # fallback
-
+            current_lr = None  
         wandb.log({
             "train_loss": avg_train_loss,
             "epoch": epoch+1,

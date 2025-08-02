@@ -23,7 +23,7 @@ def load_config(path: str = "config.yaml") -> Dict:
 def load_test_data(processed_dir: str = "processed_data"
                    ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
     proc = Path(processed_dir)
-    test_samples = jnp.array(np.load(proc / "test_data.npz")["samples"])
+    test_samples = jnp.array(np.load(proc / "val_data.npz")["samples"])
     with open(proc / "normalization_params.json") as fp:
         params = json.load(fp)
     norm = {k: jnp.array(v) for k, v in params.items()}
@@ -146,10 +146,8 @@ def main(cfg_path: str = "config.yaml") -> None:
 
     # --------------------------------------------------------------------- #
     print("Loading trained parameters …")
-    params_path = Path(config["data"].get("output_dir", "results")) / \
-                  "model_params.pkl"
-    if not params_path.exists():
-        raise FileNotFoundError(f"model params not found: {params_path}")
+    params_path = "/home/saichand/ros2_ws/src/hybrid_ode/results/model_params.pkl"
+   
     with open(params_path, "rb") as fp:
         params = pickle.load(fp)
 
@@ -190,8 +188,7 @@ def main(cfg_path: str = "config.yaml") -> None:
         print(f"[Batch {bid}]  total MSE={m['mse_total']:.6f} "
               f"Pos RMSE={m['position_rmse']:.4f}")
 
-    # --------------------------------------------------------------------- #
-    # Aggregate statistics
+
     agg = {}
     for key in overall[0]:
         if key == "mse_per_state":

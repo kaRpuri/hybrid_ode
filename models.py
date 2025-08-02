@@ -17,13 +17,13 @@ class MLPDynamics(nn.Module):
     def __call__(self, x):
         # Input expects shape (..., 6)
         x = nn.Dense(128)(x)
-        x = nn.relu(x)
+        x = nn.tanh(x)
         x = nn.Dense(128)(x)
-        x = nn.relu(x)
+        x = nn.tanh(x)
         x = nn.Dense(128)(x)
-        x = nn.relu(x)
+        x = nn.tanh(x)
         x = nn.Dense(64)(x)
-        x = nn.relu(x)
+        x = nn.tanh(x)
         x = nn.Dense(3)(x)
         return x
     
@@ -102,6 +102,8 @@ class HybridODE:
         return next_state
     
 
+    
+
     def euler_step(self, state, inputs_t, inputs_t_plus_dt, dt, params=None):
         """
         Perform a single Euler integration step for the hybrid ODE.
@@ -136,8 +138,8 @@ class HybridODE:
 
         def scan_step(state, t):
             current_input = inputs_sequence[t]
-            # next_input = inputs_sequence[t + 1]  # Not needed for Euler
-            next_state = self.euler_step(state, current_input, None, dt, params)
+            next_input = inputs_sequence[t + 1]  
+            next_state = self.rk4_step(state, current_input, next_input, dt, params)
             return next_state, next_state
 
         
@@ -146,6 +148,7 @@ class HybridODE:
         
         trajectory = jnp.vstack([initial_state, states])
         return trajectory
+    
     
 
 
@@ -164,13 +167,13 @@ class MLPStatePrediction(nn.Module):
     def __call__(self, x):
         # Input expects shape (..., 9) - 7 states + 2 inputs
         x = nn.Dense(128)(x)
-        x = nn.relu(x)
+        x = nn.tanh(x)
         x = nn.Dense(128)(x)
-        x = nn.relu(x)
+        x = nn.tanh(x)
         x = nn.Dense(128)(x)
-        x = nn.relu(x)
+        x = nn.tanh(x)
         x = nn.Dense(64)(x)
-        x = nn.relu(x)
+        x = nn.tanh(x)
         x = nn.Dense(7)(x)  # Output full state instead of 3 derivatives
         return x
     

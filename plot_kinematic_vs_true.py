@@ -20,6 +20,11 @@ for sample_idx in range(num_samples):
     plt.figure(figsize=(8, 6))
     plt.plot(true_x, true_y, label="True Trajectory", color="black")
     plt.plot(pred_x, pred_y, label="Kinematic Model", color="red", linestyle="--")
+
+    # Add markers at each point where the trajectory switches (i.e., at every step)
+    plt.scatter(true_x, true_y, color="black", marker="o", s=30, alpha=0.6)
+    plt.scatter(pred_x, pred_y, color="red", marker="x", s=30, alpha=0.6)
+
     plt.xlabel("delta_x [m]")
     plt.ylabel("delta_y [m]")
     plt.title(f"XY Trajectory: Sample {sample_idx}")
