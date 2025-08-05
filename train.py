@@ -70,27 +70,17 @@ def create_minibatches(samples, batch_size, shuffle=True, key=None):
 
 def loss_function(pred_traj, true_traj):
     """
-    Computes mean squared error for all states except yaw, and mean squared shortest angular error for yaw (index 2).
+    Computes mean squared error only for the last 3 states (velocity, side_slip, yaw_rate).
     Args:
         pred_traj: jnp.ndarray, shape (batch_size, n_steps, state_dim)
         true_traj: jnp.ndarray, shape (batch_size, n_steps, state_dim)
     Returns:
-        loss: scalar, mean loss over batch, time, and state
+        loss: scalar, mean loss over batch, time, and selected states
     """
-
-    yaw_pred = pred_traj[..., 2]
-    yaw_true = true_traj[..., 2]
-    yaw_error = ((yaw_pred - yaw_true + jnp.pi) % (2 * jnp.pi)) - jnp.pi
-
-
-    # yaw_diff = yaw_pred - yaw_true
-    # yaw_error = jnp.arctan2(jnp.sin(yaw_diff), jnp.cos(yaw_diff))
-
-    
-    squared_error = (pred_traj - true_traj) ** 2
-    
-    squared_error = squared_error.at[..., 2].set(yaw_error ** 2)
-    
+    # Select last 3 states: indices 4, 5, 6
+    pred_last3 = pred_traj[..., 4:7]
+    true_last3 = true_traj[..., 4:7]
+    squared_error = (pred_last3 - true_last3) ** 2
     return jnp.mean(squared_error)
 
 

@@ -1,0 +1,9 @@
+data:
+  dt: 0.05000000074505806
+  input_dir: synthetic_raw
+  noise_std: 0.02
+  num_multi_step_predictions: 15
+  test_ratio: 0.2
+  train_ratio: 0.6
+  val_ratio: 0.2
+  verbose: true

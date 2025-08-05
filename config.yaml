@@ -28,10 +28,10 @@ model:
   - velocity
   - side_slip
   - yaw_rate
-model_type: HybridODE
+model_type: HybridODE   #Node or HybridODE
 random_seed: 42
 training:
-  batch_size: 30000
+  batch_size: 30000 # 2^n
   early_stopping_patience: 20
   epochs: 1000
   learning_rate: 0.001

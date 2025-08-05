@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import yaml
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 from models import HybridODE, Node  # your model definition
 
@@ -164,6 +165,9 @@ def main(cfg_path: str = "config.yaml") -> None:
     print(f"Running inference on {len(jax.devices())} device(s)…")
     overall = []
 
+    last_batch_pred = None
+    last_batch_true = None
+
     for batch, bid in tqdm(batch_iter(test_samples, bs),
                            total=(test_samples.shape[0] + bs - 1) // bs,
                            desc="Batches"):
@@ -188,6 +192,50 @@ def main(cfg_path: str = "config.yaml") -> None:
         print(f"[Batch {bid}]  total MSE={m['mse_total']:.6f} "
               f"Pos RMSE={m['position_rmse']:.4f}")
 
+        # Plot and save for first 3 trajectories in this batch
+        vis_dir = Path("visualizations")
+        vis_dir.mkdir(exist_ok=True)
+        num_traj = min(3, pred.shape[0])  # change 3 to any number you want
+
+        for traj_idx in range(num_traj):
+            # Plot all states + control inputs
+            fig, axs = plt.subplots(9, 1, figsize=(10, 22), sharex=True)  # 7 states + 2 controls
+            for i, name in enumerate(STATE_NAMES):
+                axs[i].plot(t_vec, gt[traj_idx, :, i], label=f"True {name}")
+                axs[i].plot(t_vec, pred[traj_idx, :, i], label=f"Pred {name}", linestyle='--')
+                axs[i].set_ylabel(name)
+                axs[i].legend()
+            # Acceleration control input (assumed index 0)
+            axs[7].plot(t_vec, u_norm[traj_idx, :, 0], color='tab:orange', label="Acceleration (u0)")
+            axs[7].set_ylabel("Acceleration")
+            axs[7].legend()
+            # Steering rate control input (assumed index 1)
+            axs[8].plot(t_vec, u_norm[traj_idx, :, 1], color='tab:green', label="Steering Rate (u1)")
+            axs[8].set_ylabel("Steering Rate")
+            axs[8].legend()
+
+            axs[-1].set_xlabel("Time [s]")
+            plt.suptitle(f"True vs Predicted States + Controls (Trajectory {traj_idx} in Batch {bid})")
+            plt.tight_layout()
+            plt.savefig(vis_dir / f"states_controls_batch{bid}_traj{traj_idx}.png")
+            plt.close(fig)
+
+            # 2D trajectory plot (delta_x vs delta_y)
+            fig2 = plt.figure(figsize=(8, 6))
+            plt.plot(gt[traj_idx, :, 0], gt[traj_idx, :, 1], label="True Trajectory")
+            plt.plot(pred[traj_idx, :, 0], pred[traj_idx, :, 1], label="Predicted Trajectory", linestyle='--')
+            plt.xlabel("delta_x")
+            plt.ylabel("delta_y")
+            plt.title(f"2D Trajectory (Trajectory {traj_idx} in Batch {bid})")
+            plt.legend()
+            plt.axis("equal")
+            plt.tight_layout()
+            plt.savefig(vis_dir / f"2d_batch{bid}_traj{traj_idx}.png")
+            plt.close(fig2)
+
+        # Save last batch for visualization
+        last_batch_pred = pred
+        last_batch_true = gt
 
     agg = {}
     for key in overall[0]:
@@ -202,6 +250,5 @@ def main(cfg_path: str = "config.yaml") -> None:
 
     print("\nFinished!  Results stored in →", outdir.resolve())
 
-# ----------------------------------------------------------------------------- #
 if __name__ == "__main__":
     main()
