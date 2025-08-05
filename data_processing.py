@@ -275,9 +275,15 @@ def process_data(config_path="config.yaml"):
                           config)
     
     # Create multi-step samples
-    train_samples = create_multistep_samples(train_states_norm, train_inputs_norm, train_timestamps, config)
-    val_samples = create_multistep_samples(val_states_norm, val_inputs_norm, val_timestamps, config)
-    test_samples = create_multistep_samples(test_states_norm, test_inputs_norm, test_timestamps, config)
+    # train_samples = create_multistep_samples(train_states_norm, train_inputs_norm, train_timestamps, config)
+    # val_samples = create_multistep_samples(val_states_norm, val_inputs_norm, val_timestamps, config)
+    # test_samples = create_multistep_samples(test_states_norm, test_inputs_norm, test_timestamps, config)
+
+
+    # Create multi-step samples unormalized
+    train_samples = create_multistep_samples(train_states, train_inputs, train_timestamps, config)
+    val_samples = create_multistep_samples(val_states, val_inputs, val_timestamps, config)
+    test_samples = create_multistep_samples(test_states, test_inputs, test_timestamps, config)
 
     # Save processed arrays in processed_data directory
     np.savez(output_dir / "train_data.npz", samples=train_samples)

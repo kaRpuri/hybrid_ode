@@ -163,11 +163,6 @@ class HybridODE:
 
 
 
-class KinematicODE:
-    
-
-
-
 
 
 
@@ -260,7 +255,12 @@ class Node:
 
         def scan_step(state, t):
             current_input = inputs_sequence[t]
-            next_input = inputs_sequence[t + 1]  
+            # Use jnp.where to select next_input
+            next_input = jnp.where(
+                t < num_steps - 1,
+                inputs_sequence[t + 1],
+                current_input
+            )
             next_state = self.rk4_step(state, current_input, next_input, dt, params)
            
             return next_state, next_state
@@ -271,37 +271,6 @@ class Node:
         
         trajectory = jnp.vstack([initial_state, states])
         return trajectory
-    
-
-
-
-    # def predict_trajectory(self, params, initial_state, inputs_sequence, dt):
-    #     """
-    #     Roll out the trajectory for num_steps-1 using the given initial state and input sequence,
-    #     using jax.lax.scan for efficiency. Only predicts up to the last available ground-truth state.
-    #     Args:
-    #         initial_state: shape (state_dim,)
-    #         inputs_sequence: shape (num_steps, input_dim)
-    #         dt: float, time step
-    #     Returns:
-    #         states: shape (num_steps, state_dim)
-    #     """
-    #     num_steps = inputs_sequence.shape[0]
-     
-
-    #     def scan_step(state, t):
-    #         action = inputs_sequence[t]
-
-    #         next_state = self.rk4_step(state, action, params)
-    #         next_state = next_state.at[2].set(((next_state[2] + jnp.pi) % (2 * jnp.pi)) - jnp.pi)
-    #         return next_state, next_state
-
-        
-    #     indices = jnp.arange(num_steps - 1)
-    #     _, states = jax.lax.scan(scan_step, initial_state, indices)
-        
-    #     trajectory = jnp.vstack([initial_state, states])
-    #     return trajectory
 
 
     def predict_batch_trajectories(self, params, initial_states, inputs_batch, dt):
@@ -488,7 +457,11 @@ class DynamicBicycle:
         
         def scan_step(state, t):
             current_input = inputs_sequence[t]
-            next_input = inputs_sequence[t + 1] if t < num_steps - 1 else current_input
+            next_input = jnp.where(
+                t < (num_steps - 1),
+                inputs_sequence[t + 1],
+                current_input
+            )
             next_state = self.rk4_step(state, current_input, next_input, dt)
             return next_state, next_state
         
@@ -503,7 +476,7 @@ class DynamicBicycle:
 
 
 
-    def predict_batch_trajectories(self, initial_states, inputs_batch, dt):
+    def predict_batch_trajectories(self, params, initial_states, inputs_batch, dt):
         
         batch_predict_fn = jax.vmap(
             lambda s, i: self.predict_trajectory(s, i, dt), 
@@ -612,7 +585,15 @@ class KinematicBicycle:
         
         def scan_step(state, t):
             current_input = inputs_sequence[t]
-            next_input = inputs_sequence[t + 1] if t < num_steps - 1 else current_input
+            
+            next_input = jnp.where(
+            t < (num_steps - 1),
+            inputs_sequence[t + 1],
+            current_input
+        )
+
+
+
             next_state = self.rk4_step(state, current_input, next_input, dt)
             return next_state, next_state
         
@@ -624,7 +605,7 @@ class KinematicBicycle:
         trajectory = jnp.vstack([initial_state, states])
         return trajectory
     
-    def predict_batch_trajectories(self, initial_states, inputs_batch, dt):
+    def predict_batch_trajectories(self, params, initial_states, inputs_batch, dt):
         
         batch_predict_fn = jax.vmap(
             lambda s, i: self.predict_trajectory(s, i, dt),
@@ -637,7 +618,7 @@ class KinematicBicycle:
 
     
 def create_train_state(model, learning_rate, key, weight_decay=0.0):
-    "
+    
     params = model.init_network(key)
     if weight_decay > 0:
         # Example: Exponential decay scheduler

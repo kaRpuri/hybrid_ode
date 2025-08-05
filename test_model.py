@@ -11,7 +11,7 @@ import yaml
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from models import HybridODE, Node  # your model definition
+from models import HybridODE, Node, KinematicBicycle, DynamicBicycle  # your model definition
 
 # ----------------------------------------------------------------------------- #
 # Utility helpers                                                               #
@@ -88,15 +88,16 @@ def save_batch(batch_id: int,
                true: jnp.ndarray,
                metrics: Dict,
                t_vec: np.ndarray,
-               outdir: Path) -> None:
+               outdir: Path,
+               state_dim: int,
+               state_names: list) -> None:
     """
     Writes a single CSV + JSON for this batch using bulk device→host copy
     and vectorised DataFrame construction.
     """
     outdir.mkdir(exist_ok=True)
 
-    # One device→host copy each (cheap)
-    pred_np = np.asarray(pred)        # shape (B, T, 7)
+    pred_np = np.asarray(pred)        # shape (B, T, state_dim)
     true_np = np.asarray(true)
 
     B, T, _ = pred_np.shape
@@ -104,11 +105,13 @@ def save_batch(batch_id: int,
     step_ids = np.tile(np.arange(T), B)
     times    = np.tile(t_vec, B)
 
-    flat_pred = pred_np.reshape(-1, 7)
-    flat_true = true_np.reshape(-1, 7)
+    flat_pred = pred_np.reshape(-1, state_dim)
+    flat_true = true_np.reshape(-1, state_dim)
     flat_err  = flat_pred - flat_true
-    yaw_idx   = STATE_NAMES.index("yaw")
-    flat_err[:, yaw_idx] = ((flat_err[:, yaw_idx] + np.pi) % (2*np.pi)) - np.pi
+
+    if "yaw" in state_names:
+        yaw_idx = state_names.index("yaw")
+        flat_err[:, yaw_idx] = ((flat_err[:, yaw_idx] + np.pi) % (2*np.pi)) - np.pi
 
     df_dict = {
         "batch": batch_id,
@@ -116,7 +119,7 @@ def save_batch(batch_id: int,
         "step":  step_ids,
         "time":  times,
     }
-    for i, name in enumerate(STATE_NAMES):
+    for i, name in enumerate(state_names):
         df_dict[f"pred_{name}"] = flat_pred[:, i]
         df_dict[f"true_{name}"] = flat_true[:, i]
         df_dict[f"err_{name}"]  = flat_err[:, i]
@@ -124,7 +127,6 @@ def save_batch(batch_id: int,
     pd.DataFrame(df_dict).to_csv(outdir / f"batch_{batch_id}.csv",
                                  index=False)
 
-    # Save batch-level metrics
     with open(outdir / f"batch_{batch_id}_metrics.json", "w") as fp:
         json.dump(metrics, fp, indent=2)
 
@@ -159,8 +161,14 @@ def main(cfg_path: str = "config.yaml") -> None:
     elif config['model_type'] == 'Node':
         model = Node(config)
         print("Using Node model")
+    elif config['model_type'] == 'KinematicBicycle':
+        model = KinematicBicycle(config)
+        print("Using KinematicBicycle model")
+    elif config['model_type'] == 'DynamicBicycle':
+        model = DynamicBicycle(config)
+        print("Using DynamicBicycle model")
     else:
-        raise ValueError(f"Unknown model type HybridODE or Node: {config['model_type']}")
+        raise ValueError(f"Unknown model type: {config['model_type']}")
 
     print(f"Running inference on {len(jax.devices())} device(s)…")
     overall = []
@@ -169,25 +177,37 @@ def main(cfg_path: str = "config.yaml") -> None:
     last_batch_true = None
 
     for batch, bid in tqdm(batch_iter(test_samples, bs),
-                           total=(test_samples.shape[0] + bs - 1) // bs,
-                           desc="Batches"):
-        st_dim   = 7
+                       total=(test_samples.shape[0] + bs - 1) // bs,
+                       desc="Batches"):
+        if config['model_type'] == 'KinematicBicycle':
+            st_dim = 5
+            state_names = STATE_NAMES[:5]
+        elif config['model_type'] == 'DynamicBicycle':
+            st_dim = 7
+            state_names = STATE_NAMES
+        else:
+            st_dim = 7
+            state_names = STATE_NAMES
+
         s0_norm  = batch[:, :st_dim, 0]
         u_norm   = batch[:, st_dim:, :].transpose(0, 2, 1)
         gt_norm  = batch[:, :st_dim, :].transpose(0, 2, 1)
 
         # Forward pass
-        pred_norm = model.predict_batch_trajectories(params, s0_norm,
-                                                     u_norm, dt)
+        pred_norm = model.predict_batch_trajectories(params, s0_norm, u_norm, dt)
 
-        # Denormalise
-        pred = denorm(pred_norm, norm["state_mean"], norm["state_std"])
-        gt   = denorm(gt_norm,   norm["state_mean"], norm["state_std"])
+        # Denormalise only for models with 7D output
+        if config['model_type'] in ['HybridODE', 'Node']:
+            pred = denorm(pred_norm, norm["state_mean"], norm["state_std"])
+            gt   = denorm(gt_norm,   norm["state_mean"], norm["state_std"])
+        else:
+            pred = pred_norm
+            gt = gt_norm
 
         # Metrics + save
         m = trajectory_metrics(pred, gt)
         overall.append(m)
-        save_batch(bid, pred, gt, m, t_vec, outdir)
+        save_batch(bid, pred, gt, m, t_vec, outdir, st_dim, state_names)
 
         print(f"[Batch {bid}]  total MSE={m['mse_total']:.6f} "
               f"Pos RMSE={m['position_rmse']:.4f}")
