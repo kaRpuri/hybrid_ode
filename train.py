@@ -4,56 +4,35 @@ import numpy as np
 import yaml
 import pickle
 import wandb
-import os
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
 from functools import partial
 import optax
 from flax.training import train_state
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-import json
 
-from models import HybridODE, create_train_state, Node
-
+from models import HybridODE, create_train_state
 
 print(jax.devices())
+
+
+
 def load_data(processed_dir="processed_data"):
-    """
-    Loads processed train/val/test samples and normalization parameters as JAX arrays.
-    Returns:
-        train_samples: jnp.ndarray (num_samples, 9, n_steps)
-        val_samples: jnp.ndarray (num_samples, 9, n_steps)
-        test_samples: jnp.ndarray (num_samples, 9, n_steps)
-        normalization_params: dict with 'state_mean', 'state_std', 'input_mean', 'input_std' as jnp.ndarray
-    """
+    """Loads processed train/val/test samples as JAX arrays."""
     processed_dir = Path(processed_dir)
     train_data = np.load(processed_dir / "train_data.npz")
     val_data = np.load(processed_dir / "val_data.npz")
     test_data = np.load(processed_dir / "test_data.npz")
-
     train_samples = jnp.array(train_data["samples"])
     val_samples = jnp.array(val_data["samples"])
     test_samples = jnp.array(test_data["samples"])
-
-
     return train_samples, val_samples, test_samples
 
 
 
 
-
 def create_minibatches(samples, batch_size, shuffle=True, key=None):
-    """
-    Generator for minibatches from a JAX array.
-    Args:
-        samples: jnp.ndarray of shape (num_samples, 9, n_steps)
-        batch_size: int
-        shuffle: bool, whether to shuffle samples
-        key: jax.random.PRNGKey, for reproducible shuffling (optional)
-    Yields:
-        batch: jnp.ndarray of shape (batch_size, 9, n_steps)
-    """
+    """Generator for minibatches from a JAX array."""
     num_samples = samples.shape[0]
     indices = jnp.arange(num_samples)
     if shuffle:
@@ -69,15 +48,7 @@ def create_minibatches(samples, batch_size, shuffle=True, key=None):
 
 
 def loss_function(pred_traj, true_traj):
-    """
-    Computes mean squared error only for the last 3 states (velocity, side_slip, yaw_rate).
-    Args:
-        pred_traj: jnp.ndarray, shape (batch_size, n_steps, state_dim)
-        true_traj: jnp.ndarray, shape (batch_size, n_steps, state_dim)
-    Returns:
-        loss: scalar, mean loss over batch, time, and selected states
-    """
-    # Select last 3 states: indices 4, 5, 6
+    """Mean squared error for last 3 states (velocity, side_slip, yaw_rate)."""
     pred_last3 = pred_traj[..., 4:7]
     true_last3 = true_traj[..., 4:7]
     squared_error = (pred_last3 - true_last3) ** 2
@@ -86,23 +57,8 @@ def loss_function(pred_traj, true_traj):
 
 
 
-
-
-
-
-
 def train_step(train_state, batch, model, dt):
-    """
-    Performs a single training step: predicts trajectory, computes loss, gradients, and updates parameters.
-    Args:
-        train_state: Flax TrainState
-        batch: jnp.ndarray of shape (batch_size, 9, n_steps)
-        model: HybridODE instance
-        dt: float, time step
-    Returns:
-        new_train_state: updated TrainState
-        loss: scalar
-    """
+    """Single training step: predict, compute loss, update params."""
     state_dim = 7
     initial_state = batch[:, :state_dim, 0]
     inputs_sequence = batch[:, state_dim:, :].transpose(0, 2, 1)
@@ -113,26 +69,20 @@ def train_step(train_state, batch, model, dt):
         return loss_function(pred_traj, true_traj)
 
     loss, grads = jax.value_and_grad(loss_fn)(train_state.params)
-    # Gradient clipping
     grads = jax.tree_util.tree_map(lambda g: jnp.clip(g, -1.0, 1.0), grads)
     new_train_state = train_state.apply_gradients(grads=grads)
     return new_train_state, loss
 
+
+
+
 train_step = jax.jit(train_step, static_argnames=["model"])
 
 
+
+
 def validate(train_state, val_samples, model, dt, batch_size):
-    """
-    Computes average validation loss over all validation samples.
-    Args:
-        train_state: Flax TrainState
-        val_samples: jnp.ndarray (num_samples, 9, n_steps)
-        model: HybridODE instance
-        dt: float, time step
-        batch_size: int
-    Returns:
-        avg_loss: float
-    """
+    """Average validation loss over all validation samples."""
     losses = []
     for batch in create_minibatches(val_samples, batch_size, shuffle=False):
         state_dim = 7
@@ -143,6 +93,8 @@ def validate(train_state, val_samples, model, dt, batch_size):
         loss = loss_function(pred_traj, true_traj)
         losses.append(loss)
     return float(jnp.mean(jnp.array(losses)))
+
+
 
 
 def run_training_loop(train_samples, val_samples, model, train_state, dt, epochs, batch_size, validation_interval=10, early_stopping_patience=20, lr_schedule=None, learning_rate=None):
@@ -168,14 +120,8 @@ def run_training_loop(train_samples, val_samples, model, train_state, dt, epochs
 
         avg_train_loss = np.mean(epoch_losses)
         train_losses.append(avg_train_loss)
-     
         current_step = int(train_state.step)
-        if lr_schedule is not None:
-            current_lr = float(lr_schedule(current_step))
-        elif learning_rate is not None:
-            current_lr = float(learning_rate)
-        else:
-            current_lr = None  
+        current_lr = float(lr_schedule(current_step)) if lr_schedule is not None else float(learning_rate)
         wandb.log({
             "train_loss": avg_train_loss,
             "epoch": epoch+1,
@@ -199,24 +145,12 @@ def run_training_loop(train_samples, val_samples, model, train_state, dt, epochs
     return train_state, train_losses, val_losses
 
 
-def get_current_lr(train_state):
 
-    opt_state = train_state.opt_state
-
-    if hasattr(opt_state, 'inner_state'):  
-        step = opt_state.inner_state[0].count
-    else:
-        step = opt_state[0].count
     
-    return step  
-
 
 if __name__ == "__main__":
     train_samples, val_samples, test_samples = load_data()
-    
-    # Print device info for arrays and params
     print(f"train_samples device: {train_samples.device}")
-    # Load config
     with open("config.yaml", 'r') as f:
         config = yaml.safe_load(f)
 
@@ -229,33 +163,23 @@ if __name__ == "__main__":
     weight_decay = config['training']['weight_decay']
     key = jax.random.PRNGKey(config['random_seed'])
 
-    
-
     # Initialize model and train state
-    if config['model_type'] == 'HybridODE':
-        model = HybridODE(config)
-        print("Using HybridODE model")
-    elif config['model_type'] == 'Node':
-        model = Node(config)
-        print("Using Node model")
-    else:
-        raise ValueError(f"Unknown model type HybridODE or Node: {config['model_type']}")
+    model = HybridODE(config)
+    print("Using HybridODE model")
 
-    # Prepare learning rate schedule if using weight decay (AdamW)
     lr_schedule = None
     if weight_decay > 0:
-        lr_schedule = optax.exponential_decay(
+        # Linear decay learning rate schedule
+        lr_schedule = optax.linear_schedule(
             init_value=learning_rate,
-            transition_steps=100,
-            decay_rate=0.99,
-            staircase=True
+            end_value=0.0,
+            transition_steps=epochs
         )
         train_state = create_train_state(model, learning_rate, key, weight_decay)
     else:
         train_state = create_train_state(model, learning_rate, key, weight_decay)
 
     print(f"model params device: {jax.tree_util.tree_leaves(train_state.params)[0].device}")
-    # Run training loop
     train_state, train_losses, val_losses = run_training_loop(
         train_samples, val_samples, model, train_state, dt,
         epochs=epochs, batch_size=batch_size,
