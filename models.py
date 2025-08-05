@@ -527,11 +527,11 @@ class KinematicBicycle:
         beta = jnp.arctan(jnp.tan(theta) * (self.lr / self.wheelbase))
         
         # Kinematic equations
-        dx_dt = v * jnp.cos(yaw + beta)
-        dy_dt = v * jnp.sin(yaw + beta)
+        dx_dt = v * jnp.cos(yaw)
+        dy_dt = v * jnp.sin(yaw)
         dtheta_dt = steer_rate
         dv_dt = accel
-        dyaw_dt = (v * jnp.cos(beta) * jnp.tan(theta)) / self.wheelbase
+        dyaw_dt = (v * jnp.tan(theta)) / self.wheelbase
         
         return jnp.array([dx_dt, dy_dt, dtheta_dt, dv_dt, dyaw_dt])
     

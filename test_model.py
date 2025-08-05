@@ -32,7 +32,7 @@ def load_test_data(processed_dir: str = "processed_data"
 
 
 def denorm(x: jnp.ndarray, mean: jnp.ndarray, std: jnp.ndarray) -> jnp.ndarray:
-    return x * std + mean
+    return x 
 
 
 def batch_iter(data: jnp.ndarray, batch: int
